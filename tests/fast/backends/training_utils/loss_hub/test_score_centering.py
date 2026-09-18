@@ -1,6 +1,6 @@
 import torch
 
-from miles.backends.training_utils.loss_hub.score_centering import score_centering_loss
+from miles.backends.training_utils.loss_hub.score_centering import mis_weight, score_centering_loss
 
 
 def test_score_centering_cancels_constant_reward_drift_with_full_head():
@@ -44,3 +44,11 @@ def test_score_centering_composes_with_truncated_importance_sampling():
     assert torch.isfinite(loss).all()
     loss.sum().backward()
     assert torch.isfinite(trainer_logprobs.grad).all()
+
+
+def test_masked_importance_sampling_weight_rejects_outside_band():
+    ratio = torch.tensor([0.25, 0.5, 1.0, 5.0, 5.1])
+    torch.testing.assert_close(
+        mis_weight(ratio, low=0.5, high=5.0),
+        torch.tensor([0.0, 0.5, 1.0, 5.0, 0.0]),
+    )

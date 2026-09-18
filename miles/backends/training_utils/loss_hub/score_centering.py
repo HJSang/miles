@@ -66,3 +66,14 @@ def score_centering_loss(
 def tis_weight(ratio: torch.Tensor, *, low: float = 0.0, high: float = 2.0) -> torch.Tensor:
     """Truncated importance-sampling weight used with score centering."""
     return ratio.clamp(min=low, max=high)
+
+
+def mis_weight(ratio: torch.Tensor, *, low: float, high: float) -> torch.Tensor:
+    """Masked importance-sampling weight used with score centering.
+
+    MIS keeps the ratio inside the trust band and rejects tokens outside it.
+    The returned mask is detached by the caller together with the centering
+    coefficients, so the band only changes the estimator's weighting.
+    """
+    in_band = (ratio >= low) & (ratio <= high)
+    return torch.where(in_band, ratio, torch.zeros_like(ratio))

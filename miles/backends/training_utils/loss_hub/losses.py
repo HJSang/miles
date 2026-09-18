@@ -23,7 +23,7 @@ from miles.backends.training_utils.loss_hub.math_utils import (
     compute_opsm_mask,
     compute_policy_loss,
 )
-from miles.backends.training_utils.loss_hub.score_centering import score_centering_loss, tis_weight
+from miles.backends.training_utils.loss_hub.score_centering import mis_weight, score_centering_loss, tis_weight
 from miles.backends.training_utils.parallel import get_parallel_state
 from miles.utils.function_registry import load_function
 from miles.utils.types import RolloutBatch
@@ -287,10 +287,21 @@ def policy_loss_function(
         score_centering_weight_fn = None
         if args.use_tis:
             if args.custom_tis_function_path is not None:
-                raise ValueError("score centering composition requires the built-in TIS correction")
+                tis_mode = getattr(args, "tis_mode", "truncate")
+                if tis_mode != "mask":
+                    raise ValueError("score centering composition supports custom MIS only with tis_mode=mask")
+                tis_low = getattr(args, "tis_lower_bound", None)
+                tis_high = getattr(args, "tis_upper_bound", None)
+                tis_high = args.tis_clip if tis_high is None else tis_high
+                tis_low = 1.0 / tis_high if tis_low is None else tis_low
 
-            def score_centering_weight_fn(ratio: torch.Tensor) -> torch.Tensor:
-                return tis_weight(ratio, low=args.tis_clip_low, high=args.tis_clip)
+                def score_centering_weight_fn(ratio: torch.Tensor) -> torch.Tensor:
+                    return mis_weight(ratio, low=tis_low, high=tis_high)
+
+            else:
+
+                def score_centering_weight_fn(ratio: torch.Tensor) -> torch.Tensor:
+                    return tis_weight(ratio, low=args.tis_clip_low, high=args.tis_clip)
 
         pg_loss = _compute_score_centering_pg_loss(
             args=args,
@@ -330,8 +341,7 @@ def policy_loss_function(
         # Keep a copy of the original reducer (based on `batch["loss_masks"]`) for metric aggregation.
         sum_of_sample_mean_for_mismatch_metrics = sum_of_sample_mean
 
-        if score_centering_enabled:
-            assert args.custom_tis_function_path is None
+        if score_centering_enabled and args.custom_tis_function_path is None:
             tis_func = None
         elif args.custom_tis_function_path is not None:
             tis_func = load_function(args.custom_tis_function_path)
@@ -354,7 +364,12 @@ def policy_loss_function(
         }
 
         if tis_func is not None:
-            pg_loss, modified_response_masks, tis_metrics = tis_func(**tis_kwargs)
+            correction_kwargs = tis_kwargs
+            if score_centering_enabled:
+                correction_kwargs = {**tis_kwargs, "pg_loss": torch.zeros_like(pg_loss)}
+            corrected_pg_loss, modified_response_masks, tis_metrics = tis_func(**correction_kwargs)
+            if not score_centering_enabled:
+                pg_loss = corrected_pg_loss
         else:
             rollout_log_probs = torch.cat(rollout_old_log_probs, dim=0)
             train_log_probs = torch.cat(trainer_scored_log_probs, dim=0)
