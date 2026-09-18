@@ -16,7 +16,7 @@ class SessionServerConfig(FrozenStrictBaseModel):
     use_rollout_routing_replay: bool
     use_rollout_indexer_replay: bool
     use_score_centering: bool = False
-    score_centering_top_k: int = 128
+    score_centering_top_k: int
     sglang_speculative_algorithm: str | None
     num_layers: int | None
     moe_router_topk: int | None
