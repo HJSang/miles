@@ -10,14 +10,20 @@ from miles.backends.training_utils.cp_utils import (
     get_sum_of_sample_mean,
 )
 from miles.backends.training_utils.loss_hub.corrections import vanilla_tis_function
-from miles.backends.training_utils.loss_hub.logit_processors import get_log_probs_and_entropy, get_values
+from miles.backends.training_utils.loss_hub.logit_processors import (
+    _iter_response_chunks,
+    get_log_probs_and_entropy,
+    get_values,
+)
 from miles.backends.training_utils.loss_hub.math_utils import (
+    _gather_true_on_policy_full_logits,
     compute_approx_kl,
     compute_ess_ratio_contribution,
     compute_gspo_kl,
     compute_opsm_mask,
     compute_policy_loss,
 )
+from miles.backends.training_utils.loss_hub.score_centering import score_centering_loss, tis_weight
 from miles.backends.training_utils.parallel import get_parallel_state
 from miles.utils.function_registry import load_function
 from miles.utils.types import RolloutBatch
@@ -57,6 +63,74 @@ class LossFunction(Protocol):
                 on each implementation.
         """
         ...
+
+
+def _compute_score_centering_pg_loss(
+    args: Namespace,
+    batch: RolloutBatch,
+    logits: torch.Tensor,
+    advantages: list[torch.Tensor],
+    weight_fn: Callable[[torch.Tensor], torch.Tensor] | None,
+) -> torch.Tensor:
+    """Compute response-aligned score-centering losses from full trainer logits."""
+    top_ids_list = batch.get("rollout_top_logprob_ids")
+    top_logprobs_list = batch.get("rollout_top_logprobs")
+    rollout_logprobs_list = batch.get("rollout_log_probs")
+    if top_ids_list is None or top_logprobs_list is None or rollout_logprobs_list is None:
+        raise ValueError(
+            "score centering requires rollout_top_logprob_ids, rollout_top_logprobs, and rollout_log_probs"
+        )
+
+    parallel_state = get_parallel_state()
+    local_losses: list[torch.Tensor] = []
+    for sample_index, (logits_chunk, tokens_chunk, response_indices) in enumerate(
+        _iter_response_chunks(
+            logits,
+            args=args,
+            unconcat_tokens=batch["unconcat_tokens"],
+            total_lengths=batch["total_lengths"],
+            response_lengths=batch["response_lengths"],
+            max_seq_lens=batch.get("max_seq_lens"),
+            include_response_indices=True,
+        )
+    ):
+        if logits_chunk.numel() == 0:
+            local_losses.append(logits_chunk.sum().reshape(1)[:0])
+            continue
+
+        indices = torch.as_tensor(response_indices, device=logits_chunk.device, dtype=torch.long)
+        top_ids_all = top_ids_list[sample_index].to(logits_chunk.device)
+        top_logprobs_all = top_logprobs_list[sample_index].to(logits_chunk.device)
+        sampled_logprobs_all = rollout_logprobs_list[sample_index].to(logits_chunk.device)
+        advantages_all = advantages[sample_index].to(logits_chunk.device)
+        chunk_size = getattr(args, "log_probs_chunk_size", -1)
+        chunk_size = chunk_size if chunk_size and chunk_size > 0 else 128
+        for start in range(0, logits_chunk.size(0), chunk_size):
+            end = min(start + chunk_size, logits_chunk.size(0))
+            row_indices = indices[start:end]
+            full_logits = _gather_true_on_policy_full_logits(
+                logits_chunk[start:end],
+                parallel_state.tp.group,
+                vocab_size=getattr(args, "vocab_size", None),
+            ).float()
+            # `_iter_response_chunks` already applies rollout temperature in
+            # the true-on-policy path. Standard model-precision callers still
+            # need the same scaling here before constructing the distribution.
+            temperature = getattr(args, "rollout_temperature", 1.0)
+            if not args.true_on_policy_mode and temperature > 0 and temperature != 1.0:
+                full_logits = full_logits / temperature
+            local_losses.append(
+                score_centering_loss(
+                    train_log_probs=torch.log_softmax(full_logits, dim=-1),
+                    sampling_log_probs=top_logprobs_all.index_select(0, row_indices),
+                    topk_ids=top_ids_all.index_select(0, row_indices),
+                    sampled_tokens=tokens_chunk[start:end],
+                    sampled_log_probs=sampled_logprobs_all.index_select(0, row_indices),
+                    advantages=advantages_all.index_select(0, row_indices),
+                    weight_fn=weight_fn,
+                )
+            )
+    return torch.cat(local_losses, dim=0)
 
 
 def policy_loss_function(
@@ -208,6 +282,24 @@ def policy_loss_function(
         ppo_kl, advantages, args.eps_clip, args.eps_clip_high, getattr(args, "eps_clip_c", None)
     )
 
+    score_centering_enabled = bool(getattr(args, "use_score_centering", False))
+    if score_centering_enabled:
+        score_centering_weight_fn = None
+        if args.use_tis:
+            if args.custom_tis_function_path is not None:
+                raise ValueError("score centering composition requires the built-in TIS correction")
+
+            def score_centering_weight_fn(ratio: torch.Tensor) -> torch.Tensor:
+                return tis_weight(ratio, low=args.tis_clip_low, high=args.tis_clip)
+
+        pg_loss = _compute_score_centering_pg_loss(
+            args=args,
+            batch=batch,
+            logits=logits,
+            advantages=advantages_list,
+            weight_fn=score_centering_weight_fn,
+        )
+
     if getattr(args, "dump_details", None) is not None:
         from miles.backends.training_utils.debug_dump import maybe_dump_policy_loss_debug
 
@@ -238,7 +330,10 @@ def policy_loss_function(
         # Keep a copy of the original reducer (based on `batch["loss_masks"]`) for metric aggregation.
         sum_of_sample_mean_for_mismatch_metrics = sum_of_sample_mean
 
-        if args.custom_tis_function_path is not None:
+        if score_centering_enabled:
+            assert args.custom_tis_function_path is None
+            tis_func = None
+        elif args.custom_tis_function_path is not None:
             tis_func = load_function(args.custom_tis_function_path)
         else:
             assert trainer_scored_log_probs is not None, "log_probs must be provided for built-in TIS"
@@ -258,7 +353,19 @@ def policy_loss_function(
             "max_seq_lens": max_seq_lens,
         }
 
-        pg_loss, modified_response_masks, tis_metrics = tis_func(**tis_kwargs)
+        if tis_func is not None:
+            pg_loss, modified_response_masks, tis_metrics = tis_func(**tis_kwargs)
+        else:
+            rollout_log_probs = torch.cat(rollout_old_log_probs, dim=0)
+            train_log_probs = torch.cat(trainer_scored_log_probs, dim=0)
+            tis = torch.exp(train_log_probs - rollout_log_probs)
+            tis_weights = torch.clamp(tis, min=args.tis_clip_low, max=args.tis_clip)
+            tis_metrics = {
+                "tis": tis.detach(),
+                "tis_clipfrac": (tis_weights != tis).float().detach(),
+                "tis_abs": (tis - 1).abs().detach(),
+            }
+            modified_response_masks = batch["loss_masks"]
 
         # [decouple IS and rejection] modified masks correct the numerator only;
         # denominators stay the precomputed rollout_mask_sums.
