@@ -303,13 +303,42 @@ def policy_loss_function(
                 def score_centering_weight_fn(ratio: torch.Tensor) -> torch.Tensor:
                     return tis_weight(ratio, low=args.tis_clip_low, high=args.tis_clip)
 
-        pg_loss = _compute_score_centering_pg_loss(
-            args=args,
-            batch=batch,
-            logits=logits,
-            advantages=advantages_list,
-            weight_fn=score_centering_weight_fn,
-        )
+        rl_only_opd_split = args.use_opd and getattr(args, "opd_score_centering_mode", "combined") == "rl-only"
+        if rl_only_opd_split:
+            rl_only_advantages_list = [advantage.detach() for advantage in batch["rl_only_advantages"]]
+            pg_loss = _compute_score_centering_pg_loss(
+                args=args,
+                batch=batch,
+                logits=logits,
+                advantages=rl_only_advantages_list,
+                weight_fn=score_centering_weight_fn,
+            )
+            # OPD's teacher-imitation term is intentionally left uncentered here: centering it
+            # would remove the sampler-drift correction along with the intended teacher-following
+            # drift, which defeats the purpose of on-policy distillation. It still goes through the
+            # same PPO-clipped surrogate as the rest of the policy loss.
+            opd_reverse_kl_list = batch["opd_reverse_kl"]
+            opd_advantages = torch.cat(
+                [(-args.opd_kl_coef * reverse_kl.detach()).to(device=pg_loss.device) for reverse_kl in opd_reverse_kl_list],
+                dim=0,
+            )
+            opd_advantages = torch.where(
+                active_tokens,
+                torch.nan_to_num(opd_advantages, nan=0.0, posinf=0.0, neginf=0.0),
+                opd_advantages.new_zeros(()),
+            )
+            pg_loss_opd, _ = compute_policy_loss(
+                ppo_kl, opd_advantages, args.eps_clip, args.eps_clip_high, getattr(args, "eps_clip_c", None)
+            )
+            pg_loss = pg_loss + pg_loss_opd
+        else:
+            pg_loss = _compute_score_centering_pg_loss(
+                args=args,
+                batch=batch,
+                logits=logits,
+                advantages=advantages_list,
+                weight_fn=score_centering_weight_fn,
+            )
 
     if getattr(args, "dump_details", None) is not None:
         from miles.backends.training_utils.debug_dump import maybe_dump_policy_loss_debug
