@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from miles.backends.training_utils import checkpoint_io
+from miles.backends.training_utils import artifact_io
 from miles.backends.training_utils.checkpoint_io import write_checkpoint_dir
 from miles.utils import distributed_phase
 from miles.utils.distributed_phase import DistributedPhaseError
@@ -28,9 +28,9 @@ def test_rank_failure_is_shared_before_next_barrier(tmp_path, monkeypatch):
     barrier_calls = 0
     gather_calls = 0
 
-    monkeypatch.setattr(checkpoint_io.dist, "is_initialized", lambda: True)
-    monkeypatch.setattr(checkpoint_io.dist, "get_rank", lambda: 0)
-    monkeypatch.setattr(checkpoint_io.dist, "get_world_size", lambda group=None: 2)
+    monkeypatch.setattr(artifact_io.dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(artifact_io.dist, "get_rank", lambda: 0)
+    monkeypatch.setattr(artifact_io.dist, "get_world_size", lambda group=None: 2)
     monkeypatch.setattr(distributed_phase, "get_gloo_group", lambda: object())
 
     def barrier(group):
@@ -42,8 +42,8 @@ def test_rank_failure_is_shared_before_next_barrier(tmp_path, monkeypatch):
         gather_calls += 1
         output[:] = [None, "OSError: shard serialization failed"] if gather_calls == 2 else [None, None]
 
-    monkeypatch.setattr(checkpoint_io.dist, "barrier", barrier)
-    monkeypatch.setattr(checkpoint_io.dist, "all_gather_object", all_gather_object)
+    monkeypatch.setattr(artifact_io.dist, "barrier", barrier)
+    monkeypatch.setattr(artifact_io.dist, "all_gather_object", all_gather_object)
 
     def fail_write(_):
         raise OSError("local failure")
