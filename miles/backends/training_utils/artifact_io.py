@@ -3,7 +3,7 @@
 import json
 import os
 import shutil
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -204,7 +204,7 @@ class ArtifactStore:
                 continue
             shutil.copy2(source_file, target / source_file.name)
 
-    def run_local_phase(self, phase: str, operation) -> None:
+    def run_local_phase(self, phase: str, operation: Callable[[], None]) -> None:
         self._phase_gate.run_local_phase(phase, operation)
 
     def wait_for_all(self) -> None:
