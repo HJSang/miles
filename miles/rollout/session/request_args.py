@@ -127,6 +127,13 @@ def resolve_request_args_by_config(
     # Training replay follows the launch flags; eval never requests replay outputs.
     request_args["return_routed_experts"] = not evaluation and bool(config.use_rollout_routing_replay)
     request_args["return_indexer_topk"] = not evaluation and bool(config.use_rollout_indexer_replay)
+    # R3 replay follows the launch flags, on or off.
+    request_args["return_routed_experts"] = bool(config.use_rollout_routing_replay)
+    request_args["return_indexer_topk"] = bool(config.use_rollout_indexer_replay)
+    if config.use_score_centering:
+        request_args["top_logprobs_num"] = max(
+            int(request_args.get("top_logprobs_num", 0) or 0), config.score_centering_top_k
+        )
 
     # The served adapter is selected by training; SGLang lets a ``base:adapter``
     # model parameter beat ``lora_path``, so that spelling is refused too.

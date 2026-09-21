@@ -16,6 +16,8 @@ class SessionServerConfig(FrozenStrictBaseModel):
     use_rollout_routing_replay: bool
     use_rollout_indexer_replay: bool
     use_sampling_support_replay: bool
+    use_score_centering: bool
+    score_centering_top_k: int
     sglang_speculative_algorithm: str | None
     num_layers: int | None
     moe_router_topk: int | None
@@ -46,6 +48,8 @@ def compute_session_server_config(
         use_rollout_routing_replay=args.use_rollout_routing_replay,
         use_rollout_indexer_replay=args.use_rollout_indexer_replay,
         use_sampling_support_replay=args.use_sampling_support_replay,
+        use_score_centering=getattr(args, "use_score_centering", False),
+        score_centering_top_k=getattr(args, "score_centering_top_k", 128),
         sglang_speculative_algorithm=args.sglang_speculative_algorithm,
         num_layers=getattr(args, "num_layers", None),
         moe_router_topk=getattr(args, "moe_router_topk", None),
