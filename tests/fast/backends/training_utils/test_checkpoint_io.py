@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from miles.backends.training_utils.checkpoint_io import write_checkpoint_dir
+from miles.backends.training_utils import checkpoint_io
+from miles.backends.training_utils.checkpoint_io import DistributedCheckpointError, write_checkpoint_dir
 
 
 @pytest.mark.parametrize("error", [OSError("disk full"), RuntimeError("directory creation failed")])
@@ -18,6 +19,38 @@ def test_directory_errors_propagate(error, tmp_path, monkeypatch):
     with pytest.raises(type(error), match=str(error)) as caught:
         write_checkpoint_dir(tmp_path / "checkpoint", lambda _: None)
     assert caught.value is error
+
+
+def test_rank_failure_is_shared_before_next_barrier(tmp_path, monkeypatch):
+    checkpoint = tmp_path / "checkpoint"
+    barrier_calls = 0
+    gather_calls = 0
+
+    monkeypatch.setattr(checkpoint_io.dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(checkpoint_io.dist, "get_rank", lambda: 0)
+    monkeypatch.setattr(checkpoint_io.dist, "get_world_size", lambda group=None: 2)
+    monkeypatch.setattr(checkpoint_io, "get_gloo_group", lambda: object())
+
+    def barrier(group):
+        nonlocal barrier_calls
+        barrier_calls += 1
+
+    def all_gather_object(output, local_message, group):
+        nonlocal gather_calls
+        gather_calls += 1
+        output[:] = [None, "OSError: shard serialization failed"] if gather_calls == 2 else [None, None]
+
+    monkeypatch.setattr(checkpoint_io.dist, "barrier", barrier)
+    monkeypatch.setattr(checkpoint_io.dist, "all_gather_object", all_gather_object)
+
+    def fail_write(_):
+        raise OSError("local failure")
+
+    with pytest.raises(DistributedCheckpointError, match="rank 1: OSError: shard serialization failed"):
+        write_checkpoint_dir(checkpoint, fail_write)
+
+    assert gather_calls == 2
+    assert barrier_calls == 1
 
 
 @pytest.mark.parametrize("crash_before_publish", [True, False])

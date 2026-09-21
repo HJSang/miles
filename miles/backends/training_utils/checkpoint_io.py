@@ -1,7 +1,5 @@
 """Checkpoint directories: written collectively, complete at their final path."""
 
-# TODO: isolate checkpoint IO failures; they currently terminate the trainer cell.
-
 import json
 import os
 import shutil
@@ -12,6 +10,16 @@ from uuid import uuid4
 import torch.distributed as dist
 
 from miles.utils.distributed_utils import get_gloo_group
+
+
+class DistributedCheckpointError(RuntimeError):
+    """A checkpoint phase failed on one or more ranks."""
+
+    def __init__(self, phase: str, failures: list[tuple[int, str]]) -> None:
+        details = "; ".join(f"rank {rank}: {message}" for rank, message in failures)
+        super().__init__(f"checkpoint phase {phase!r} failed ({details})")
+        self.phase = phase
+        self.failures = failures
 
 
 def write_checkpoint_dir(
@@ -53,11 +61,11 @@ def write_checkpoint_dir(
         tmp_dir.symlink_to(version_dir.name, target_is_directory=True)
         os.replace(tmp_dir, final_dir)
 
-    make_tmp_dir()
+    _run_phase("prepare", make_tmp_dir)
     _barrier()
-    write_shards(tmp_dir)
+    _run_phase("write_shards", lambda: write_shards(tmp_dir))
     _barrier()
-    publish_dir()
+    _run_phase("publish", publish_dir)
     _barrier()
 
 
@@ -68,3 +76,30 @@ def _rank() -> int:
 def _barrier() -> None:
     if dist.is_initialized():
         dist.barrier(group=get_gloo_group())
+
+
+def _run_phase(phase: str, operation: Callable[[], None]) -> None:
+    """Run local checkpoint work and share failures before the next barrier."""
+    local_error: Exception | None = None
+    try:
+        operation()
+    except Exception as error:
+        local_error = error
+
+    if not dist.is_initialized():
+        if local_error is not None:
+            raise local_error
+        return
+
+    local_message = None
+    if local_error is not None:
+        local_message = f"{type(local_error).__name__}: {local_error}"
+    group = get_gloo_group()
+    messages: list[str | None] = [None] * dist.get_world_size(group=group)
+    dist.all_gather_object(messages, local_message, group=group)
+    failures = [(rank, message) for rank, message in enumerate(messages) if message is not None]
+    if failures:
+        error = DistributedCheckpointError(phase, failures)
+        if local_error is not None:
+            raise error from local_error
+        raise error
