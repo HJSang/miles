@@ -7,7 +7,9 @@ from pathlib import Path
 import pytest
 
 from miles.backends.training_utils import checkpoint_io
-from miles.backends.training_utils.checkpoint_io import DistributedCheckpointError, write_checkpoint_dir
+from miles.backends.training_utils.checkpoint_io import write_checkpoint_dir
+from miles.utils import distributed_phase
+from miles.utils.distributed_phase import DistributedPhaseError
 
 
 @pytest.mark.parametrize("error", [OSError("disk full"), RuntimeError("directory creation failed")])
@@ -29,7 +31,7 @@ def test_rank_failure_is_shared_before_next_barrier(tmp_path, monkeypatch):
     monkeypatch.setattr(checkpoint_io.dist, "is_initialized", lambda: True)
     monkeypatch.setattr(checkpoint_io.dist, "get_rank", lambda: 0)
     monkeypatch.setattr(checkpoint_io.dist, "get_world_size", lambda group=None: 2)
-    monkeypatch.setattr(checkpoint_io, "get_gloo_group", lambda: object())
+    monkeypatch.setattr(distributed_phase, "get_gloo_group", lambda: object())
 
     def barrier(group):
         nonlocal barrier_calls
@@ -46,7 +48,7 @@ def test_rank_failure_is_shared_before_next_barrier(tmp_path, monkeypatch):
     def fail_write(_):
         raise OSError("local failure")
 
-    with pytest.raises(DistributedCheckpointError, match="rank 1: OSError: shard serialization failed"):
+    with pytest.raises(DistributedPhaseError, match="rank 1: OSError: shard serialization failed"):
         write_checkpoint_dir(checkpoint, fail_write)
 
     assert gather_calls == 2
