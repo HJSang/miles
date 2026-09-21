@@ -127,6 +127,7 @@ def save_hf_model(
     """
     should_log = get_parallel_state().effective_dp_cp.rank == 0 and get_parallel_state().tp.rank == 0
     path = Path(path if path is not None else args.save_hf.format(rollout_id=rollout_id))
+    artifact_store = ArtifactStore()
 
     try:
         if should_log:
@@ -145,7 +146,7 @@ def save_hf_model(
             )
         else:
             bridge = _get_hf_bridge(args.hf_checkpoint)
-            ArtifactStore().ensure_dir(path)
+            artifact_store.ensure_dir(path)
             if torch.distributed.get_rank() == 0:
                 (path / HF_EXPORT_COMPLETE_MARKER).unlink(missing_ok=True)
             with patch_megatron_model(model):
@@ -186,5 +187,9 @@ def save_hf_model(
                 logger.error(f"Failed to save LoRA adapter: {e}")
             return
 
-    if torch.distributed.get_rank() == 0:
-        (path / HF_EXPORT_COMPLETE_MARKER).touch()
+    def publish_complete_marker() -> None:
+        if torch.distributed.get_rank() == 0:
+            artifact_store.atomic_write_bytes(path / HF_EXPORT_COMPLETE_MARKER, b"")
+
+    artifact_store.run_local_phase("hf_export.complete", publish_complete_marker)
+    artifact_store.wait_for_all()
