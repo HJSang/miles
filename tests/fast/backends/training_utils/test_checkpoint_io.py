@@ -40,7 +40,7 @@ def test_rank_failure_is_shared_before_next_barrier(tmp_path, monkeypatch):
     def all_gather_object(output, local_message, group):
         nonlocal gather_calls
         gather_calls += 1
-        output[:] = [None, "OSError: shard serialization failed"] if gather_calls == 2 else [None, None]
+        output[:] = [None, "OSError: shard serialization failed"] if gather_calls == 3 else [None, None]
 
     monkeypatch.setattr(artifact_io.dist, "barrier", barrier)
     monkeypatch.setattr(artifact_io.dist, "all_gather_object", all_gather_object)
@@ -51,8 +51,9 @@ def test_rank_failure_is_shared_before_next_barrier(tmp_path, monkeypatch):
     with pytest.raises(DistributedPhaseError, match="rank 1: OSError: shard serialization failed"):
         write_checkpoint_dir(checkpoint, fail_write)
 
-    assert gather_calls == 2
-    assert barrier_calls == 1
+    assert gather_calls == 3
+    assert barrier_calls == 2
+    assert not (tmp_path / "_tmp_checkpoint").exists()
 
 
 @pytest.mark.parametrize("crash_before_publish", [True, False])

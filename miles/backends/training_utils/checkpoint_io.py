@@ -12,12 +12,15 @@ def write_checkpoint_dir(
     metadata: dict | None = None,
     *,
     overwrite: bool = True,
+    shared_storage: bool = True,
 ) -> None:
     """Write collectively, then atomically point ``path`` at the completed version.
 
     All ranks must call. Readers may still hold an older version, so retain it.
+    With shared storage, only the publisher rank mutates the public path. With
+    node-local storage, every rank publishes on its own filesystem.
     """
-    store = ArtifactStore()
+    store = ArtifactStore(shared_storage=shared_storage)
     with store.staging_dir(path, overwrite=overwrite) as staging:
         store.run_local_phase("checkpoint.write_shards", lambda: write_shards(staging))
         store.wait_for_all()

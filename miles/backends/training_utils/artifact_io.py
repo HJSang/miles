@@ -17,7 +17,12 @@ HF_WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt", ".pth", ".gguf")
 
 
 class ArtifactStore:
-    """Write files and collectively publish complete artifact directories."""
+    """Write files and collectively publish complete artifact directories.
+
+    Shared storage lets the publisher rank perform the filesystem mutation while
+    every rank participates in the phase gates. Node-local storage makes each
+    rank perform the same mutation in its own local filesystem.
+    """
 
     def __init__(
         self,
@@ -25,9 +30,11 @@ class ArtifactStore:
         *,
         control_group: dist.ProcessGroup | None = None,
         publisher_rank: int = 0,
+        shared_storage: bool = True,
     ) -> None:
         self.root = Path(root) if root is not None else None
         self.publisher_rank = publisher_rank
+        self.shared_storage = shared_storage
         self._phase_gate = DistributedPhaseGate(control_group)
 
     @property
@@ -86,12 +93,12 @@ class ArtifactStore:
 
     @contextmanager
     def staging_dir(self, final_dir: str | Path, *, overwrite: bool = True) -> Iterator[Path]:
-        """Prepare a shared staging directory; callers publish it after local phases pass."""
+        """Prepare staging; callers publish it after all local phases pass."""
         destination = self.path(final_dir)
         staging = destination.parent / f"_tmp_{destination.name}"
 
         def prepare() -> None:
-            if not self.is_publisher:
+            if self.shared_storage and not self.is_publisher:
                 return
             if not overwrite and destination.exists():
                 raise FileExistsError(f"artifact {destination} already exists")
@@ -103,11 +110,17 @@ class ArtifactStore:
                 staging.unlink()
             elif staging.exists():
                 shutil.rmtree(staging)
-            staging.mkdir(parents=True)
 
         self._phase_gate.run_local_phase("artifact.stage", prepare)
         self._phase_gate.wait_for_all()
-        yield staging
+
+        self._phase_gate.run_local_phase("artifact.stage.mkdir", lambda: staging.mkdir(parents=True, exist_ok=True))
+        self._phase_gate.wait_for_all()
+        try:
+            yield staging
+        except Exception:
+            self._remove_path(staging)
+            raise
 
     def publish(
         self,
@@ -116,12 +129,14 @@ class ArtifactStore:
         marker: str | None = None,
         metadata: Mapping[str, Any] | None = None,
     ) -> None:
-        """Atomically publish the shared staging directory at ``final_dir``."""
+        """Atomically publish staging at ``final_dir`` according to storage scope."""
         destination = self.path(final_dir)
         staging = destination.parent / f"_tmp_{destination.name}"
+        version_dir: Path | None = None
 
         def publish_local() -> None:
-            if not self.is_publisher:
+            nonlocal version_dir
+            if self.shared_storage and not self.is_publisher:
                 return
             if metadata is not None:
                 self.atomic_write_json(staging / "META.json", dict(metadata))
@@ -132,8 +147,29 @@ class ArtifactStore:
             staging.symlink_to(version_dir.name, target_is_directory=True)
             os.replace(staging, destination)
 
-        self._phase_gate.run_local_phase("artifact.publish", publish_local)
+        try:
+            self._phase_gate.run_local_phase("artifact.publish", publish_local)
+        except Exception:
+            self._remove_path(staging)
+            if (
+                version_dir is not None
+                and version_dir.exists()
+                and (not destination.is_symlink() or destination.resolve() != version_dir)
+            ):
+                self._remove_path(version_dir)
+            raise
         self._phase_gate.wait_for_all()
+
+    @staticmethod
+    def _remove_path(path: Path) -> None:
+        if path.is_symlink() or path.is_file():
+            path.unlink(missing_ok=True)
+        elif path.is_dir():
+            try:
+                shutil.rmtree(path)
+            except FileNotFoundError:
+                # Another rank may have removed the shared staging path first.
+                pass
 
     def write_tracker(self, path: str | Path, version: int | str) -> Path:
         return self.atomic_write_bytes(path, str(version).encode())
