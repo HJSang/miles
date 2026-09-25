@@ -343,8 +343,10 @@ class TrainerController:
         info = await self._inference_controller.start_update_weights()
         if not info.rollout_engines:
             # Every rollout server is frozen (e.g. a --sglang-config sampler with
-            # update_weights: false), so there is nothing to broadcast to.
+            # update_weights: false), so there is nothing to broadcast to. The
+            # controller lock taken by start_update_weights is released by end_update_weights.
             log_structured(logger.info, tag="ft", op="update_weights", phase="skip_no_updatable", rollout=rollout_id)
+            await self._inference_controller.end_update_weights(snapshot_cell_id_to_hashes={})
             return None
         # Catch with vanilla retry: cells w/ exceptions are auto marked errored, thus retry will find the next one
         weight_versions = await retry(

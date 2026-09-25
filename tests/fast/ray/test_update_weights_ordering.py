@@ -151,6 +151,25 @@ async def test_the_trainer_hands_end_update_weights_the_snapshot_start_returned(
     _assert_the_snapshot_is_handed_back_unchanged(group._inference_controller)
 
 
+@pytest.mark.asyncio
+async def test_a_frozen_sampler_skips_the_broadcast_but_still_closes_the_update_window():
+    """With no updatable engine (every rollout server frozen) the RPC is skipped, yet
+    end_update_weights still runs so the controller lock taken by start is released."""
+    order: list[str] = []
+    group = _make_controller(order)
+
+    async def _start_with_no_engines() -> object:
+        order.append("start_update_weights")
+        return MagicMock(rollout_engines=[], snapshot_cell_id_to_hashes={})
+
+    group._inference_controller.start_update_weights = _start_with_no_engines
+
+    assert await group.update_weights(rollout_id=3) is None
+
+    assert order == ["start_update_weights", "end_update_weights"]
+    group._execute_first_alive.assert_not_awaited()
+
+
 def test_fsdp_updater_flushes_only_after_every_engine_is_paused():
     """Each weight-update phase finishes on every engine before the next phase starts on any."""
     from unittest.mock import patch
