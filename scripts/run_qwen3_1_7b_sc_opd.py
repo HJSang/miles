@@ -100,6 +100,11 @@ class ScriptArgs(U.ExecuteTrainConfig):
             raise ValueError("The teacher sampler is always frozen; --no-freeze-sampler needs --sampler student.")
         if self.refresh_interval < 1:
             raise ValueError("--refresh-interval must be at least 1.")
+        if self.freeze_sampler and self.eval_num_gpus < 1:
+            raise ValueError(
+                "A frozen sampler needs a dedicated eval fleet (--eval-num-gpus >= 1): shared-engine eval "
+                "would score the frozen sampler instead of the student."
+            )
 
         total = self.actor_num_gpus + self.rollout_num_gpus + self.eval_num_gpus
         available = self.num_nodes * self.num_gpus_per_node
