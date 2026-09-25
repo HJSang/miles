@@ -6,10 +6,14 @@ from typing import Any
 import aiohttp
 import torch
 
+from miles.rollout.rm_hub import rule_based_rm
 from miles.utils.types import Sample
 
 TopLogprobs = list[list[Any]]
 LogprobMaps = list[dict[int, float]]
+
+# Key under which the teacher payload carries the rule-based monitoring score (--opd-monitor-rm-type).
+MONITOR_REWARD_KEY = "opd_monitor_reward"
 
 TOP_K_STRATEGIES = {"only-student", "only-teacher", "intersection", "union", "xor"}
 REWARD_WEIGHT_MODES = {"student_p", "teacher_p", "none"}
@@ -42,16 +46,35 @@ def parse_teacher_urls(values: Iterable[str] | None) -> dict[str, str]:
     return url_map
 
 
+def _in_job_teacher_url(args: Namespace) -> str | None:
+    """Router URL of the teacher served inside this job by ``--sglang-config`` (``--opd-teacher-model``)."""
+    model_name = getattr(args, "opd_teacher_model", None)
+    if not model_name:
+        return None
+    routers = getattr(args, "sglang_model_routers", None) or {}
+    if model_name not in routers:
+        raise ValueError(
+            f"--opd-teacher-model {model_name!r} names no model in --sglang-config "
+            f"(available routers: {sorted(routers)})."
+        )
+    ip, port = routers[model_name]
+    return f"http://{ip}:{port}/generate"
+
+
 def _teacher_url_for_sample(args: Namespace, sample: Sample) -> str:
     """Resolve the teacher scoring endpoint for one sample.
 
-    Without ``--opd-teacher-urls`` every sample goes to ``--rm-url`` (the
-    original single-teacher path, unchanged). With it, the sample is routed by
-    the teacher name in ``sample.metadata[--opd-teacher-key]``; samples whose
-    name is missing or unknown fall back to the reserved ``default`` entry,
-    and raise if no default is configured — silently distilling from the
-    wrong teacher is worse than failing the rollout.
+    ``--opd-teacher-model`` points at a teacher served inside this job by
+    ``--sglang-config`` and wins outright. Otherwise, without ``--opd-teacher-urls``
+    every sample goes to ``--rm-url`` (the original single-teacher path, unchanged).
+    With it, the sample is routed by the teacher name in
+    ``sample.metadata[--opd-teacher-key]``; samples whose name is missing or
+    unknown fall back to the reserved ``default`` entry, and raise if no default
+    is configured — silently distilling from the wrong teacher is worse than
+    failing the rollout.
     """
+    if (in_job_url := _in_job_teacher_url(args)) is not None:
+        return in_job_url
     url_map = parse_teacher_urls(getattr(args, "opd_teacher_urls", None))
     if not url_map:
         return args.rm_url
@@ -173,6 +196,16 @@ def _input_logprob_maps(response: dict[str, Any], field: str, response_length: i
     return [
         _top_entries_to_map(entries) for entries in _trim_input_field(response["meta_info"], field, response_length)
     ]
+
+
+def _rollout_log_probs_as_teacher(sample: Sample) -> torch.Tensor:
+    log_probs = sample.rollout_log_probs
+    if log_probs is None or len(log_probs) != sample.response_length:
+        raise ValueError(
+            "--opd-teacher-from-rollout-logprobs needs per-token rollout_log_probs for the response "
+            f"(got {None if log_probs is None else len(log_probs)}, expected {sample.response_length})."
+        )
+    return torch.tensor(log_probs, dtype=torch.float32)
 
 
 def _teacher_sampled_log_probs(response: dict[str, Any], response_length: int) -> torch.Tensor:
@@ -349,7 +382,33 @@ def _compute_topk_reverse_kl(
     return torch.tensor(reverse_kls, dtype=torch.float32)
 
 
-async def reward_func(args: Namespace, sample: Sample, **kwargs: Any) -> dict[str, Any]:
+def _sample_rm_type_override(sample: Sample) -> str:
+    metadata = sample.metadata if isinstance(sample.metadata, dict) else {}
+    return str(metadata.get("rm_type") or "").strip()
+
+
+async def reward_func(args: Namespace, sample: Sample, **kwargs: Any) -> dict[str, Any] | float:
+    """Score one rollout: teacher log-probs for training samples, a plain reward for eval samples.
+
+    Eval datasets tag their samples with a per-sample ``rm_type`` override, so those are
+    graded by the built-in reward and never sent to the teacher. Training samples get the
+    teacher payload, plus the ``--opd-monitor-rm-type`` score when one is configured; that
+    score is only logged, never trained on.
+    """
+    if override_rm_type := _sample_rm_type_override(sample):
+        return await rule_based_rm(args, sample, override_rm_type)
+
+    if getattr(args, "opd_teacher_from_rollout_logprobs", False):
+        # The sampler is the teacher: its rollout log-probs are the teacher log-probs.
+        reward_payload: dict[str, Any] = {}
+    else:
+        reward_payload = await _score_with_teacher(args, sample)
+    if monitor_rm_type := getattr(args, "opd_monitor_rm_type", None):
+        reward_payload[MONITOR_REWARD_KEY] = float(await rule_based_rm(args, sample, monitor_rm_type))
+    return reward_payload
+
+
+async def _score_with_teacher(args: Namespace, sample: Sample) -> dict[str, Any]:
     top_k = _get_opd_top_k(args)
     # Optional per-request timeout so a hung teacher/student scoring call cannot stall
     # the whole rollout (no-op when unset).
@@ -412,25 +471,42 @@ def post_process_rewards(args: Namespace, samples: list[Sample], **kwargs: Any) 
     """
     raw_rewards = [sample.get_reward_value(args) for sample in samples]
     response_lengths = [sample.response_length for sample in samples]
+    for sample, reward in zip(samples, raw_rewards, strict=True):
+        if not isinstance(reward, dict):
+            raise ValueError(
+                "OPD training samples must carry the teacher payload, but a sample was graded by a "
+                f"per-sample rm_type override instead (metadata={sample.metadata!r}). Per-sample rm_type "
+                "overrides are reserved for eval datasets."
+            )
 
     if _get_opd_top_k(args) > 0:
         for sample, reward in zip(samples, raw_rewards, strict=True):
             sample.opd_reverse_kl = _compute_topk_reverse_kl(args, sample, reward)
-        scalar_rewards = [0.0] * len(samples)
-        return scalar_rewards, scalar_rewards
+        return _logged_and_trained_rewards(args, raw_rewards)
 
-    teacher_log_probs = [
-        _teacher_sampled_log_probs(reward, response_length)
-        for reward, response_length in zip(raw_rewards, response_lengths, strict=True)
-    ]
+    if getattr(args, "opd_teacher_from_rollout_logprobs", False):
+        teacher_log_probs = [_rollout_log_probs_as_teacher(sample) for sample in samples]
+    else:
+        teacher_log_probs = [
+            _teacher_sampled_log_probs(reward, response_length)
+            for reward, response_length in zip(raw_rewards, response_lengths, strict=True)
+        ]
 
     for sample, t_log_probs in zip(samples, teacher_log_probs, strict=True):
         sample.teacher_log_probs = t_log_probs
 
-    # Return scalar rewards for GRPO/PPO advantage estimator.
-    # For pure on-policy distillation, we use 0.0 as the task reward.
-    # The learning signal comes entirely from the OPD KL penalty.
-    # If you have task rewards, you can add them here.
-    scalar_rewards = [0.0] * len(samples)
+    return _logged_and_trained_rewards(args, raw_rewards)
 
-    return scalar_rewards, scalar_rewards
+
+def _logged_and_trained_rewards(args: Namespace, raw_rewards: list[dict[str, Any]]) -> tuple[list[float], list[float]]:
+    """Return ``(logged, trained)`` scalar rewards.
+
+    The learning signal is the OPD penalty alone, so the reward fed to the advantage
+    estimator is always zero. With ``--opd-monitor-rm-type`` the rule-based score stored by
+    ``reward_func`` is surfaced as the logged rollout reward so training-set accuracy can be
+    tracked without changing the loss.
+    """
+    zeros = [0.0] * len(raw_rewards)
+    if not getattr(args, "opd_monitor_rm_type", None):
+        return zeros, zeros
+    return [float(reward[MONITOR_REWARD_KEY]) for reward in raw_rewards], zeros

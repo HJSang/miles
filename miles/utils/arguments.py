@@ -1806,6 +1806,36 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
             parser.add_argument(
                 "--opd-teacher-ckpt-step", type=int, default=None, help="The checkpoint step for OPD teacher model."
             )
+            parser.add_argument(
+                "--opd-teacher-model",
+                type=str,
+                default=None,
+                help=(
+                    "Name of a model in --sglang-config that serves the teacher inside this job "
+                    "(typically a frozen `update_weights: false` model). Its router replaces --rm-url "
+                    "for teacher scoring. --opd-type=sglang only."
+                ),
+            )
+            parser.add_argument(
+                "--opd-teacher-from-rollout-logprobs",
+                action="store_true",
+                default=False,
+                help=(
+                    "Take the teacher log-probs from the rollout engine's own log-probs instead of "
+                    "scoring with a teacher server: use when the sampler served by --sglang-config IS "
+                    "the frozen teacher. Requires --opd-type=sglang and --opd-log-prob-top-k 0."
+                ),
+            )
+            parser.add_argument(
+                "--opd-monitor-rm-type",
+                type=str,
+                default=None,
+                help=(
+                    "Built-in reward type (e.g. math) scored on training rollouts in --opd-type=sglang mode "
+                    "and reported as the logged rollout reward. Monitoring only: the advantage stays pure "
+                    "distillation regardless of this flag."
+                ),
+            )
             return parser
 
         def add_router_arguments(parser):
@@ -3012,11 +3042,32 @@ def miles_validate_args(args):
                     "--opd-teacher-load should not be set when --opd-type=sglang. "
                     "In sglang mode, teacher log-probs are obtained from external server during rollout."
                 )
+        if args.opd_monitor_rm_type and args.opd_type != "sglang":
+            raise ValueError("--opd-monitor-rm-type is only supported with --opd-type=sglang.")
+        if args.opd_teacher_model:
+            if args.opd_type != "sglang":
+                raise ValueError("--opd-teacher-model is only supported with --opd-type=sglang.")
+            if args.opd_teacher_urls:
+                raise ValueError("--opd-teacher-model and --opd-teacher-urls are mutually exclusive.")
+            if getattr(args, "sglang_config", None) is None:
+                raise ValueError("--opd-teacher-model names a model in --sglang-config, which is not set.")
+        if args.opd_teacher_from_rollout_logprobs:
+            if args.opd_type != "sglang":
+                raise ValueError("--opd-teacher-from-rollout-logprobs is only supported with --opd-type=sglang.")
+            if args.opd_log_prob_top_k > 0:
+                raise ValueError("--opd-teacher-from-rollout-logprobs requires --opd-log-prob-top-k 0.")
+            if args.opd_teacher_model or args.opd_teacher_urls:
+                raise ValueError(
+                    "--opd-teacher-from-rollout-logprobs takes the teacher from the rollout engine; "
+                    "do not also set --opd-teacher-model or --opd-teacher-urls."
+                )
     else:
         if args.opd_teacher_load is not None:
             raise ValueError("--opd-teacher-load is set but --use-opd is not enabled. Please add --use-opd flag.")
         if args.opd_teacher_urls:
             raise ValueError("--opd-teacher-urls is set but --use-opd is not enabled. Please add --use-opd flag.")
+        if args.opd_monitor_rm_type:
+            raise ValueError("--opd-monitor-rm-type is set but --use-opd is not enabled. Please add --use-opd flag.")
 
     # TODO: During loading, we need to set the start_rollout_id here.
     if args.megatron_to_hf_mode == "bridge":

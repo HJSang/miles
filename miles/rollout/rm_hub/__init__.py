@@ -46,6 +46,15 @@ async def async_rm(args, sample: Sample, **kwargs):
         rm_function = load_function(custom_rm_path)
         return await rm_function(args, sample, **kwargs)
 
+    return await rule_based_rm(args, sample, rm_type)
+
+
+async def rule_based_rm(args, sample: Sample, rm_type: str):
+    """Score ``sample`` with the built-in reward named by ``rm_type``, ignoring ``--custom-rm-path``.
+
+    A custom reward function that wants a task score next to its own signal (e.g. on-policy
+    distillation adding a rule-based reward to the teacher log-probs) calls this directly.
+    """
     response = sample.response
     label = sample.label
     metadata = sample.metadata if isinstance(sample.metadata, dict) else {}

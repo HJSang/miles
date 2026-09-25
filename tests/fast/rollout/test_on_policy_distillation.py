@@ -1,9 +1,11 @@
+import asyncio
 import math
 from argparse import Namespace
 
 import pytest
 from tests.ci.ci_register import register_cpu_ci
 
+from miles.rollout import on_policy_distillation as opd
 from miles.rollout.on_policy_distillation import (
     _compute_topk_reverse_kl,
     _per_position_ids,
@@ -205,3 +207,115 @@ def test_routing_missing_name_without_default_raises():
     args = _routing_args(urls=["math=http://h1/generate"])
     with pytest.raises(ValueError, match="missing teacher key"):
         _teacher_url_for_sample(args, _tagged_sample({}))
+
+
+# ---------------------------------------------------------------------------
+# In-job teacher (--opd-teacher-model) and the frozen-sampler reward path
+# ---------------------------------------------------------------------------
+
+
+def test_in_job_teacher_model_router_wins_over_rm_url_and_teacher_urls():
+    args = _routing_args(urls=["math=http://h1/generate"])
+    args.opd_teacher_model = "teacher"
+    args.sglang_model_routers = {"default": ("10.0.0.1", 30000), "teacher": ("10.0.0.2", 30001)}
+
+    assert _teacher_url_for_sample(args, _tagged_sample({"opd_teacher": "math"})) == "http://10.0.0.2:30001/generate"
+
+
+def test_in_job_teacher_model_unknown_name_raises():
+    args = _routing_args()
+    args.opd_teacher_model = "teacher"
+    args.sglang_model_routers = {"default": ("10.0.0.1", 30000)}
+
+    with pytest.raises(ValueError, match="names no model in --sglang-config"):
+        _teacher_url_for_sample(args, _tagged_sample({}))
+
+
+def _reward_args(**overrides):
+    defaults = dict(
+        opd_log_prob_top_k=0,
+        opd_teacher_urls=None,
+        opd_teacher_key="opd_teacher",
+        opd_teacher_model=None,
+        opd_teacher_from_rollout_logprobs=False,
+        opd_monitor_rm_type=None,
+        rm_url="http://single-teacher/generate",
+        reward_key=None,
+    )
+    return Namespace(**{**defaults, **overrides})
+
+
+def _fake_rule_based_rm(score):
+    async def rm(args, sample, rm_type):
+        rm.calls.append(rm_type)
+        return score
+
+    rm.calls = []
+    return rm
+
+
+async def _teacher_must_not_be_called(args, sample):
+    raise AssertionError("teacher scoring must not run for this sample")
+
+
+def test_reward_func_grades_eval_samples_with_their_rm_type_and_skips_the_teacher(monkeypatch):
+    rm = _fake_rule_based_rm(1.0)
+    monkeypatch.setattr(opd, "rule_based_rm", rm)
+    monkeypatch.setattr(opd, "_score_with_teacher", _teacher_must_not_be_called)
+
+    reward = asyncio.run(opd.reward_func(_reward_args(), _tagged_sample({"rm_type": "math"})))
+
+    assert reward == 1.0
+    assert rm.calls == ["math"]
+
+
+def test_reward_func_attaches_monitor_reward_next_to_teacher_payload(monkeypatch):
+    rm = _fake_rule_based_rm(0.0)
+    monkeypatch.setattr(opd, "rule_based_rm", rm)
+
+    async def fake_teacher(args, sample):
+        return {"meta_info": {"input_token_logprobs": [[0.0], [-1.0], [-2.0]]}}
+
+    monkeypatch.setattr(opd, "_score_with_teacher", fake_teacher)
+
+    reward = asyncio.run(opd.reward_func(_reward_args(opd_monitor_rm_type="math"), _tagged_sample()))
+
+    assert reward["meta_info"]["input_token_logprobs"] == [[0.0], [-1.0], [-2.0]]
+    assert reward[opd.MONITOR_REWARD_KEY] == 0.0
+    assert rm.calls == ["math"]
+
+
+def test_reward_func_skips_teacher_scoring_when_the_sampler_is_the_teacher(monkeypatch):
+    monkeypatch.setattr(opd, "_score_with_teacher", _teacher_must_not_be_called)
+
+    reward = asyncio.run(opd.reward_func(_reward_args(opd_teacher_from_rollout_logprobs=True), _tagged_sample()))
+
+    assert reward == {}
+
+
+def test_post_process_uses_rollout_logprobs_as_teacher_and_never_trains_on_the_monitor_reward():
+    args = _reward_args(opd_teacher_from_rollout_logprobs=True, opd_monitor_rm_type="math")
+    sample = Sample(tokens=[1, 2, 3], response_length=2, rollout_log_probs=[-0.5, -1.5])
+    sample.reward = {opd.MONITOR_REWARD_KEY: 1.0}
+
+    logged, trained = opd.post_process_rewards(args, [sample])
+
+    assert sample.teacher_log_probs.tolist() == pytest.approx([-0.5, -1.5])
+    assert logged == [1.0]
+    assert trained == [0.0]
+
+
+def test_post_process_zero_rewards_without_a_monitor_rm_type():
+    args = _reward_args(opd_teacher_from_rollout_logprobs=True)
+    sample = Sample(tokens=[1, 2, 3], response_length=2, rollout_log_probs=[-0.5, -1.5])
+    sample.reward = {}
+
+    assert opd.post_process_rewards(args, [sample]) == ([0.0], [0.0])
+
+
+def test_post_process_rejects_training_samples_graded_by_an_rm_type_override():
+    sample = _tagged_sample({"rm_type": "math"})
+    sample.reward = 1.0
+
+    with pytest.raises(ValueError, match="reserved for eval datasets"):
+        opd.post_process_rewards(_reward_args(), [sample])

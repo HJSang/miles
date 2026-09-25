@@ -341,6 +341,11 @@ class TrainerController:
         # Fetch the updatable engines once (like V1 RayActorGroup) so all
         # ranks observe a consistent engine set.
         info = await self._inference_controller.start_update_weights()
+        if not info.rollout_engines:
+            # Every rollout server is frozen (e.g. a --sglang-config sampler with
+            # update_weights: false), so there is nothing to broadcast to.
+            log_structured(logger.info, tag="ft", op="update_weights", phase="skip_no_updatable", rollout=rollout_id)
+            return None
         # Catch with vanilla retry: cells w/ exceptions are auto marked errored, thus retry will find the next one
         weight_versions = await retry(
             lambda _: self._execute_first_alive("update_weights", info=info),

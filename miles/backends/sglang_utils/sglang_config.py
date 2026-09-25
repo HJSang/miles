@@ -2,13 +2,13 @@
 
 import logging
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Literal
 
 import pydantic
 import yaml
 
 from miles.backends.sglang_utils.arguments import collect_eval_sglang_overrides
+from miles.utils.file_arg_utils import resolve_file_arg
 from miles.utils.lora.utils import is_multi_lora_enabled
 from miles.utils.pydantic_utils import FrozenStrictBaseModel
 
@@ -112,7 +112,8 @@ class _RawSglangConfig(FrozenStrictBaseModel):
 
     @classmethod
     def from_yaml(cls, path: str) -> "_RawSglangConfig":
-        return cls.model_validate(yaml.safe_load(Path(path).read_text()))
+        """Load from a YAML file path or an inline ``base64:`` payload (see ``resolve_file_arg``)."""
+        return cls.model_validate(yaml.safe_load(resolve_file_arg(path)))
 
     @staticmethod
     def from_prefill_num_servers(args) -> "_RawSglangConfig":
