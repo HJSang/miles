@@ -29,6 +29,7 @@ Args:
         is the uncentered baseline (plain sampled-token OPD) for ablations.
     score_centering_top_k: Sampler top-k log-probs kept for score centering (paper: 128).
     opd_kl_coef: Beta, the distillation coefficient.
+    lr: Constant Adam learning rate (1e-6 default; raise it to amplify sampler drift in staleness studies).
     enable_mis: Compose score centering with masked importance sampling (paper's MIS+SC).
     enable_thinking: Qwen3 thinking mode for rollouts and eval (off by default).
     monitor_rm_type: Built-in reward logged on training rollouts; never trained on.
@@ -77,6 +78,7 @@ class ScriptArgs(U.ExecuteTrainConfig):
     score_centering: bool = True
     score_centering_top_k: int = 128
     opd_kl_coef: float = 1.0
+    lr: float = 1e-6
     enable_mis: bool = False
     enable_thinking: bool = False
     monitor_rm_type: str = "math"
@@ -283,9 +285,7 @@ def execute(args: ScriptArgs):
 
     eval_args = f"--eval-interval {args.eval_interval} --eval-config {U.encode_pseudo_file(_eval_config_text(args))} --eval-num-gpus {args.eval_num_gpus} --eval-num-gpus-per-engine 1 --eval-hf-dir /dev/shm/{args.run_id}/eval_hf "
 
-    optimizer_args = (
-        "--optimizer adam --lr 1e-6 --lr-decay-style constant --weight-decay 0.1 --adam-beta1 0.9 --adam-beta2 0.98 "
-    )
+    optimizer_args = f"--optimizer adam --lr {args.lr} --lr-decay-style constant --weight-decay 0.1 --adam-beta1 0.9 --adam-beta2 0.98 "
 
     perf_args = "--tensor-model-parallel-size 1 --pipeline-model-parallel-size 1 --context-parallel-size 1 --expert-model-parallel-size 1 --expert-tensor-parallel-size 1 --recompute-granularity full --recompute-method uniform --recompute-num-layers 1 --use-dynamic-batch-size --max-tokens-per-gpu 16384 "
 
