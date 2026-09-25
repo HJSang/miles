@@ -240,6 +240,11 @@ def _compute_zero_std_metrics(args, all_samples: list[Sample]):
     if args.advantage_estimator == "ppo":
         return {}
 
+    # A custom reward function may hand back a non-scalar payload (e.g. OPD's teacher
+    # log-probs); the reward-distribution metrics only exist for scalar rewards.
+    if any(not isinstance(sample.get_reward_value(args), Number) for sample in all_samples):
+        return {}
+
     def _is_zero_std(samples: list[Sample]):
         rewards = [sample.get_reward_value(args) for sample in samples]
         return len(rewards) == 0 or all(rewards[0] == r for r in rewards)

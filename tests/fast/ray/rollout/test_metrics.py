@@ -150,6 +150,15 @@ class TestComputeZeroStdMetrics:
         out = _compute_zero_std_metrics(args, samples)
         assert out == {"zero_std/all_zero_percentage": 0.0, "zero_std/all_one_percentage": 0.0}
 
+    def test_non_scalar_rewards_skip_the_zero_std_metrics(self):
+        """A custom reward function may return a payload (OPD stores the teacher log-probs there);
+        the reward-distribution metrics only make sense for scalars, so they are skipped, not crashed."""
+        args = make_args(advantage_estimator="grpo")
+        payload = {"meta_info": {"input_token_logprobs": [[-0.1]]}}
+        samples = [make_sample(group_index=0, index=i, reward=dict(payload)) for i in range(4)]
+
+        assert _compute_zero_std_metrics(args, samples) == {}
+
     def test_grpo_zero_std_groups_produce_bucket_counts_and_percentages(self):
         """1 group all-1, 1 group all-0, 1 group mixed → bucket counts plus the
         all_zero/all_one percentages over total groups."""
