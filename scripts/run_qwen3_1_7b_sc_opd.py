@@ -264,7 +264,9 @@ def execute(args: ScriptArgs):
         score_centering_args += f"--use-tis --custom-config-path {U.encode_pseudo_file(_mis_config_text())} --custom-tis-function-path examples.infra_features.train_infer_mismatch_helper.mis.compute_mis_weights_with_cp "
 
     sampler_args = f"--sglang-config {U.encode_pseudo_file(_sglang_config_text(args))} "
-    if not args.freeze_sampler:
+    if args.freeze_sampler:
+        sampler_args += "--rollout-frozen-sampler "
+    else:
         sampler_args += f"--update-weights-interval {args.refresh_interval} "
 
     algo_args = "--advantage-estimator grpo --entropy-coef 0.00 --eps-clip 0.2 --eps-clip-high 0.28 "

@@ -18,8 +18,19 @@ def max_rollouts_without_published_weight_version(args: Namespace) -> int:
     return max(_MIN_ROLLOUTS_WITHOUT_PUBLISHED_WEIGHT_VERSION, args.update_weights_interval + 1)
 
 
+def _weight_versions_are_unchecked(args: Namespace) -> bool:
+    # A frozen sampler (--rollout-frozen-sampler) never receives a weight update by design,
+    # so its samples legitimately carry the sglang placeholder version.
+    return bool(getattr(args, "rollout_frozen_sampler", False)) or is_lora_enabled(args)
+
+
 def assert_weight_version_is_published(args: Namespace, *, rollouts_since_publish: int) -> None:
-    if args.debug_rollout_only or args.debug_train_only or args.debug_skip_weight_update or is_lora_enabled(args):
+    if (
+        args.debug_rollout_only
+        or args.debug_train_only
+        or args.debug_skip_weight_update
+        or _weight_versions_are_unchecked(args)
+    ):
         return
 
     assert rollouts_since_publish <= max_rollouts_without_published_weight_version(args), (
@@ -31,7 +42,7 @@ def assert_weight_version_is_published(args: Namespace, *, rollouts_since_publis
 
 
 def assert_samples_weight_version_sane(args: Namespace, samples: list["Sample"]) -> None:
-    if args.debug_rollout_only or args.debug_skip_weight_update or is_lora_enabled(args):
+    if args.debug_rollout_only or args.debug_skip_weight_update or _weight_versions_are_unchecked(args):
         return
 
     for sample in samples:

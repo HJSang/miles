@@ -40,6 +40,15 @@ def _make_sample(versions: list[str], index: int = 0) -> Sample:
     )
 
 
+def test_a_frozen_sampler_may_serve_the_placeholder_version_forever():
+    """--rollout-frozen-sampler engines never get a weight update, so the placeholder version and
+    an unbounded run of rollouts without a published version are both expected, not bugs."""
+    args = _make_args(rollout_frozen_sampler=True)
+
+    assert_samples_weight_version_sane(args, [_make_sample([SGLANG_LITERAL, SGLANG_LITERAL])])
+    assert_weight_version_is_published(args, rollouts_since_publish=10_000)
+
+
 def _simulate_rollouts_since_publish(*, update_weights_interval: int, num_rollout: int) -> list[int]:
     counts: list[int] = []
     rollouts_since_publish = 0

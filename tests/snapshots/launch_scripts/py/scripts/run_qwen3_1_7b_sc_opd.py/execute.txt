@@ -59,7 +59,8 @@ export no_proxy=127.0.0.1 && export PYTHONUNBUFFERED=1 && ray job submit
   --opd-teacher-from-rollout-logprobs 
   --use-score-centering
   --score-centering-top-k 128 
-  --sglang-config base64:<frozen-pseudo-file-1> 
+  --sglang-config base64:<frozen-pseudo-file-1>
+  --rollout-frozen-sampler 
   --advantage-estimator grpo
   --entropy-coef 0.00
   --eps-clip 0.2

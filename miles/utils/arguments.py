@@ -856,6 +856,17 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Interval for updating the weights",
             )
             parser.add_argument(
+                "--rollout-frozen-sampler",
+                action="store_true",
+                default=False,
+                help=(
+                    "Declare that the training rollout engines serve a frozen model that never receives "
+                    "weight updates (an --sglang-config model with update_weights: false), e.g. a fixed "
+                    "teacher or the initial student for off-policy distillation. Disables the weight-version "
+                    "checks that otherwise require training data to come from a synced engine."
+                ),
+            )
+            parser.add_argument(
                 "--pause-generation-mode",
                 type=str,
                 choices=["abort", "retract", "in_place"],
@@ -3535,6 +3546,14 @@ def miles_validate_args(args):
     assert not (
         getattr(args, "sglang_config", None) is not None and getattr(args, "prefill_num_servers", None) is not None
     ), "sglang_config and prefill_num_servers are mutually exclusive. Use server_groups in the YAML config instead."
+
+    if args.rollout_frozen_sampler:
+        assert (
+            getattr(args, "sglang_config", None) is not None
+        ), "--rollout-frozen-sampler needs an --sglang-config declaring the frozen sampler (update_weights: false)."
+        assert (
+            args.update_weights_interval == 1
+        ), "--rollout-frozen-sampler never syncs the sampler; --update-weights-interval has no effect and must stay 1."
 
     if args.qkv_format == "bshd":
         assert args.train_backend == "megatron", "bshd format is only supported for megatron backend."
