@@ -1,0 +1,66 @@
+### 0
+mkdir -p /root/models /root/datasets
+
+### 1
+hf download Qwen/Qwen3-1.7B
+  --local-dir /root/models/Qwen3-1.7B
+
+### 2
+hf download Qwen/Qwen3-8B
+  --local-dir /root/models/Qwen3-8B
+
+### 3
+hf download
+  --repo-type dataset zhuzilin/dapo-math-17k
+  --local-dir /root/datasets/dapo-math-17k
+
+### 4
+hf download
+  --repo-type dataset zhuzilin/aime-2024
+  --local-dir /root/datasets/aime-2024
+
+### 5
+hf download
+  --repo-type dataset zhuzilin/aime-2025
+  --local-dir /root/datasets/aime-2025
+
+### 6
+hf download
+  --repo-type dataset HuggingFaceH4/MATH-500
+  --local-dir /root/datasets/MATH-500
+
+### 7
+python3 <REPO_ROOT>/scripts/tools/build_boxed_math_eval.py
+  --src /root/datasets/aime-2024/aime-2024.jsonl
+  --dst /root/datasets/sc_opd_eval/aime24.jsonl
+
+### 8
+python3 <REPO_ROOT>/scripts/tools/build_boxed_math_eval.py
+  --src /root/datasets/aime-2025/aime-2025.jsonl
+  --dst /root/datasets/sc_opd_eval/aime25.jsonl
+
+### 9
+python3 <REPO_ROOT>/scripts/tools/build_boxed_math_eval.py
+  --src /root/datasets/MATH-500/test.jsonl
+  --dst /root/datasets/sc_opd_eval/math500.jsonl
+
+### 10
+PYTHONPATH=<REPO_ROOT>:/root/Megatron-LM:/frozen/pythonpath torchrun
+  --nproc-per-node 8 <REPO_ROOT>/tools/convert_hf_to_torch_dist.py
+  --swiglu
+  --num-layers 28
+  --hidden-size 2048
+  --ffn-hidden-size 6144
+  --num-attention-heads 16
+  --group-query-attention
+  --num-query-groups 8
+  --use-rotary-position-embeddings
+  --disable-bias-linear
+  --normalization RMSNorm
+  --norm-epsilon 1e-6
+  --rotary-base 1000000
+  --vocab-size 151936
+  --kv-channels 128
+  --qk-layernorm
+  --hf-checkpoint /root/models/Qwen3-1.7B
+  --save /root/models/Qwen3-1.7B_torch_dist 

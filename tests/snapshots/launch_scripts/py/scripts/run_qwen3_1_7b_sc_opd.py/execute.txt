@@ -1,0 +1,164 @@
+### 0
+pkill -9 sglang; sleep 3; ray stop
+  --force; pkill -9 ray; pkill -9 miles; sleep 3; pkill -9 ray; pkill -9 miles; pkill -9 redis; true; 
+
+### 1
+export PYTHONUNBUFFERED=1 && ray start
+  --head
+  --node-ip-address 127.0.0.1
+  --num-gpus 8
+  --disable-usage-stats
+
+### 2
+nvidia-smi topo -m 2>/dev/null | grep -o 'NV[0-9][0-9]*' | wc -l
+
+### 3
+export no_proxy=127.0.0.1 && export PYTHONUNBUFFERED=1 && ray job submit
+  --address="http://127.0.0.1:8265"
+  --runtime-env-json='{"env_vars": {"PYTHONUNBUFFERED": "1", "CUDA_DEVICE_MAX_CONNECTIONS": "1", "NCCL_NVLS_ENABLE": "0", "no_proxy": "127.0.0.1,127.0.0.1", "MASTER_ADDR": "127.0.0.1", "PYTHONPATH": "<REPO_ROOT>:/root/Megatron-LM:/frozen/pythonpath"}}'
+  -- python3 <REPO_ROOT>/train.py
+  --swiglu
+  --num-layers 28
+  --hidden-size 2048
+  --ffn-hidden-size 6144
+  --num-attention-heads 16
+  --group-query-attention
+  --num-query-groups 8
+  --use-rotary-position-embeddings
+  --disable-bias-linear
+  --normalization RMSNorm
+  --norm-epsilon 1e-6
+  --rotary-base 1000000
+  --vocab-size 151936
+  --kv-channels 128
+  --qk-layernorm
+  --hf-checkpoint /root/models/Qwen3-1.7B
+  --load /root/models/Qwen3-1.7B_torch_dist
+  --save /root/shared_data/260101-000000-000/checkpoints
+  --save-interval 50 
+  --prompt-data /root/datasets/dapo-math-17k/dapo-math-17k.jsonl
+  --input-key prompt
+  --label-key label
+  --apply-chat-template
+  --apply-chat-template-kwargs '{"enable_thinking": false}'
+  --rollout-shuffle
+  --num-rollout 300
+  --rollout-batch-size 32
+  --n-samples-per-prompt 8
+  --rollout-max-response-len 8192
+  --rollout-temperature 1
+  --global-batch-size 256
+  --balance-data 
+  --custom-rm-path miles.rollout.on_policy_distillation.reward_func
+  --custom-reward-post-process-path miles.rollout.on_policy_distillation.post_process_rewards
+  --use-opd
+  --opd-type sglang
+  --opd-kl-coef 1.0
+  --opd-log-prob-top-k 0
+  --opd-monitor-rm-type math
+  --opd-teacher-from-rollout-logprobs 
+  --use-score-centering
+  --score-centering-top-k 128 
+  --sglang-config base64:<frozen-pseudo-file-1> 
+  --advantage-estimator grpo
+  --entropy-coef 0.00
+  --eps-clip 0.2
+  --eps-clip-high 0.28 
+  --eval-interval 20
+  --eval-config base64:<frozen-pseudo-file-2>
+  --eval-num-gpus 2
+  --eval-num-gpus-per-engine 1
+  --eval-hf-dir /dev/shm/260101-000000-000/eval_hf 
+  --optimizer adam
+  --lr 1e-6
+  --lr-decay-style constant
+  --weight-decay 0.1
+  --adam-beta1 0.9
+  --adam-beta2 0.98 
+  --tensor-model-parallel-size 1
+  --pipeline-model-parallel-size 1
+  --context-parallel-size 1
+  --expert-model-parallel-size 1
+  --expert-tensor-parallel-size 1
+  --recompute-granularity full
+  --recompute-method uniform
+  --recompute-num-layers 1
+  --use-dynamic-batch-size
+  --max-tokens-per-gpu 16384 
+  --rollout-num-gpus-per-engine 1
+  --sglang-mem-fraction-static 0.7
+  --sglang-chunked-prefill-size 4096 
+  --actor-num-nodes 1
+  --actor-num-gpus-per-node 2
+  --rollout-num-gpus 4
+  --num-gpus-per-node 8
+  --attention-dropout 0.0
+  --hidden-dropout 0.0
+  --accumulate-allreduce-grads-in-fp32
+  --attention-softmax-in-fp32
+  --attention-backend flash 
+  --use-wandb
+  --wandb-project miles-run_qwen3_1_7b_sc_opd
+  --wandb-group 260101-000000-000
+  --wandb-key 'frozen-wandb-api-key'
+  --disable-wandb-random-suffix   
+
+### pseudo file 1
+{
+  "sglang": [
+    {
+      "name": "default",
+      "model_path": "/root/models/Qwen3-8B",
+      "update_weights": false,
+      "server_groups": [
+        {
+          "worker_type": "regular",
+          "num_gpus": 4,
+          "num_gpus_per_engine": 1
+        }
+      ]
+    },
+    {
+      "name": "eval",
+      "server_groups": [
+        {
+          "worker_type": "regular",
+          "num_gpus": 2,
+          "num_gpus_per_engine": 1
+        }
+      ]
+    }
+  ]
+}
+
+### pseudo file 2
+{
+  "eval": {
+    "defaults": {
+      "temperature": 0.7,
+      "top_p": 0.8,
+      "top_k": 20,
+      "max_response_len": 16384
+    },
+    "datasets": [
+      {
+        "name": "aime24",
+        "path": "/root/datasets/sc_opd_eval/aime24.jsonl",
+        "rm_type": "math",
+        "n_samples_per_eval_prompt": 16
+      },
+      {
+        "name": "aime25",
+        "path": "/root/datasets/sc_opd_eval/aime25.jsonl",
+        "rm_type": "math",
+        "n_samples_per_eval_prompt": 16
+      },
+      {
+        "name": "math500",
+        "path": "/root/datasets/sc_opd_eval/math500.jsonl",
+        "rm_type": "math",
+        "n_samples_per_eval_prompt": 2
+      }
+    ]
+  }
+}

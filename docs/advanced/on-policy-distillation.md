@@ -132,6 +132,28 @@ The teacher model is loaded directly into Megatron via `--opd-teacher-load`. Tea
 
 > **Note**: The teacher checkpoint must be in Megatron format (`torch_dist` or `torch`). You can convert from HuggingFace format using `tools/convert_hf_to_torch_dist.py`.
 
+## Score-Centered OPD with a Frozen Sampler
+
+Score centering ([`--use-score-centering`](score-centered-opd.md)) makes the sampled-token OPD
+loss drift-free when the rollouts come from a sampler that is not the current student:
+a frozen teacher, the initial student, or a student synced only every `K` rollouts.
+The derivation and the exact loss are in [Score-Centered On-Policy Distillation](score-centered-opd.md).
+
+| Argument | Description |
+|----------|-------------|
+| `--opd-teacher-model` | Name of a model in `--sglang-config` that serves the teacher inside the job; its router replaces `--rm-url`. |
+| `--opd-teacher-from-rollout-logprobs` | The sampler *is* the teacher: take the teacher log-probs from the rollout engine instead of scoring. Requires `--opd-log-prob-top-k 0`. |
+| `--opd-monitor-rm-type` | Built-in reward scored on training rollouts and reported as the logged rollout reward. Monitoring only: the advantage stays pure distillation. |
+| `--update-weights-interval` | `K`: sync the sampler to the trainer every `K` rollouts (only for a sampler with `update_weights: true`). |
+
+`scripts/run_qwen3_1_7b_sc_opd.py` runs the Qwen3-1.7B / Qwen3-8B recipe on
+DAPO-17K with a dedicated eval fleet on AIME 2024/2025 and MATH-500:
+
+```bash
+python scripts/run_qwen3_1_7b_sc_opd.py --sampler teacher
+python scripts/run_qwen3_1_7b_sc_opd.py --sampler student --no-freeze-sampler --refresh-interval 64
+```
+
 ## Running the Examples
 
 Complete example scripts are provided in `examples/on_policy_distillation/`:
