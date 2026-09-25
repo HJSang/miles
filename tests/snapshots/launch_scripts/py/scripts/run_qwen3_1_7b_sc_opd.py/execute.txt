@@ -71,7 +71,7 @@ export no_proxy=127.0.0.1 && export PYTHONUNBUFFERED=1 && ray job submit
   --eval-num-gpus-per-engine 1
   --eval-hf-dir /dev/shm/260101-000000-000/eval_hf 
   --optimizer adam
-  --lr 1e-6
+  --lr 1e-06
   --lr-decay-style constant
   --weight-decay 0.1
   --adam-beta1 0.9
