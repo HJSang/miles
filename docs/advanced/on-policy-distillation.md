@@ -153,6 +153,8 @@ DAPO-17K with a dedicated eval fleet on AIME 2024/2025 and MATH-500:
 ```bash
 python scripts/run_qwen3_1_7b_sc_opd.py --sampler teacher
 python scripts/run_qwen3_1_7b_sc_opd.py --sampler student --no-freeze-sampler --refresh-interval 64
+# uncentered baseline for ablations: same stale sampler, plain sampled-token OPD
+python scripts/run_qwen3_1_7b_sc_opd.py --sampler student --no-freeze-sampler --refresh-interval 64 --no-score-centering
 ```
 
 ## Running the Examples

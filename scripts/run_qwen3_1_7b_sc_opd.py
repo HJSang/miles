@@ -25,6 +25,8 @@ Args:
     refresh_interval: K, the sampler refresh interval in rollout steps (unfrozen only).
     actor_num_gpus / sampler_num_gpus / teacher_num_gpus / eval_num_gpus: GPU layout.
         ``teacher_num_gpus`` is only used with ``--sampler student``.
+    score_centering: Apply score centering to the distillation loss. ``--no-score-centering``
+        is the uncentered baseline (plain sampled-token OPD) for ablations.
     score_centering_top_k: Sampler top-k log-probs kept for score centering (paper: 128).
     opd_kl_coef: Beta, the distillation coefficient.
     enable_mis: Compose score centering with masked importance sampling (paper's MIS+SC).
@@ -72,6 +74,7 @@ class ScriptArgs(U.ExecuteTrainConfig):
     teacher_num_gpus: int = 2
     eval_num_gpus: int = 2
 
+    score_centering: bool = True
     score_centering_top_k: int = 128
     opd_kl_coef: float = 1.0
     enable_mis: bool = False
@@ -259,7 +262,9 @@ def execute(args: ScriptArgs):
     else:
         opd_args += "--opd-teacher-model teacher "
 
-    score_centering_args = f"--use-score-centering --score-centering-top-k {args.score_centering_top_k} "
+    score_centering_args = ""
+    if args.score_centering:
+        score_centering_args += f"--use-score-centering --score-centering-top-k {args.score_centering_top_k} "
     if args.enable_mis:
         score_centering_args += f"--use-tis --custom-config-path {U.encode_pseudo_file(_mis_config_text())} --custom-tis-function-path examples.infra_features.train_infer_mismatch_helper.mis.compute_mis_weights_with_cp "
 
