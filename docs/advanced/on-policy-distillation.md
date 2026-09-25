@@ -143,7 +143,8 @@ The derivation and the exact loss are in [Score-Centered On-Policy Distillation]
 |----------|-------------|
 | `--opd-teacher-model` | Name of a model in `--sglang-config` that serves the teacher inside the job; its router replaces `--rm-url`. |
 | `--opd-teacher-from-rollout-logprobs` | The sampler *is* the teacher: take the teacher log-probs from the rollout engine instead of scoring. Requires `--opd-log-prob-top-k 0`. |
-| `--opd-monitor-rm-type` | Built-in reward scored on training rollouts and reported as the logged rollout reward. Monitoring only: the advantage stays pure distillation. |
+| `--opd-monitor-rm-type` | Built-in reward scored on training rollouts and reported as `rollout/raw_reward`. Monitoring only: the trained reward (`rollout/rewards`) stays zero and the advantage is pure distillation. |
+| `--rollout-frozen-sampler` | Declare that the training engines serve a frozen model (`--sglang-config` with `update_weights: false`). Skips the weight-version checks that otherwise require training data to come from a synced engine. |
 | `--update-weights-interval` | `K`: sync the sampler to the trainer every `K` rollouts (only for a sampler with `update_weights: true`). |
 
 `scripts/run_qwen3_1_7b_sc_opd.py` runs the Qwen3-1.7B / Qwen3-8B recipe on

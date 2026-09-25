@@ -365,8 +365,12 @@ the whole run and the initial weight sync is skipped. Two layouts are supported:
 
 | sampler | `--sglang-config` models | teacher log-probs | flags |
 |---|---|---|---|
-| teacher (`q = T`) | `default` = teacher, frozen; `eval` | the rollout engine's own log-probs | `--opd-teacher-from-rollout-logprobs` |
-| initial student (`q = p_0`) | `default` = student, frozen; `teacher` = teacher, frozen; `eval` | scored by the in-job `teacher` router | `--opd-teacher-model teacher` |
+| teacher (`q = T`) | `default` = teacher, frozen; `eval` | the rollout engine's own log-probs | `--rollout-frozen-sampler --opd-teacher-from-rollout-logprobs` |
+| initial student (`q = p_0`) | `default` = student, frozen; `teacher` = teacher, frozen; `eval` | scored by the in-job `teacher` router | `--rollout-frozen-sampler --opd-teacher-model teacher` |
+
+`--rollout-frozen-sampler` tells Miles that no training engine will ever receive a
+weight update, so the weight-version checks (which otherwise require training data
+to come from a synced engine) are skipped and the initial weight broadcast is a no-op.
 
 The eval fleet (`--eval-num-gpus`, `--eval-hf-dir`) evaluates the *student* from HF
 snapshots the trainer exports, so evaluation is independent of which model the
