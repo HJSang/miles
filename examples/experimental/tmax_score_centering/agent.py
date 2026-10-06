@@ -251,10 +251,23 @@ async def run(base_url: str, prompt: list[dict], request_kwargs: dict, metadata:
     verdict = trial_result_to_metadata(result)
     verdict["trial_dir"] = str(trial.paths.trial_dir)
     has_eval_verdict = evaluation and bool(getattr(result.verifier_result, "rewards", None))
-    if verdict["exit_status"] != "Submitted" and not has_eval_verdict:
-        raise RuntimeError(f"TMax trial failed: {verdict}")
     agent_result = json.loads((trial.paths.trial_dir / "agent" / "tmax.json").read_text())
     verdict["agent_metrics"].update(agent_result)
+    if verdict["exit_status"] != "Submitted" and not has_eval_verdict:
+        # A timeout or sandbox/agent error has no model reward. Mark the
+        # generated group aborted so fully-async retry can regenerate it;
+        # never turn an infrastructure failure into a zero-reward sample.
+        exception_info = getattr(result, "exception_info", None)
+        verdict.update(
+            reward=None,
+            tmax_aborted=True,
+            tmax_error={
+                "exit_status": verdict["exit_status"],
+                "exception_type": getattr(exception_info, "exception_type", None),
+                "exception_message": getattr(exception_info, "exception_message", None),
+            },
+        )
+        return verdict
     if not evaluation and not agent_result["submitted"]:
         verdict.update(reward=0.0, exit_status="StepOrTokenLimitExceeded")
     return verdict
@@ -262,5 +275,5 @@ async def run(base_url: str, prompt: list[dict], request_kwargs: dict, metadata:
 
 async def reward_func(args, samples, **kwargs):
     if isinstance(samples, list):
-        return [sample.metadata["reward"] for sample in samples]
-    return samples.metadata["reward"]
+        return [sample.metadata.get("reward") for sample in samples]
+    return samples.metadata.get("reward")

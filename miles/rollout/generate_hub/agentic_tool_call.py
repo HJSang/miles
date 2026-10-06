@@ -135,6 +135,12 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
             raise ValueError("a successful session collect must carry metrics")
 
     samples = result.samples
+    if isinstance(agent_metadata, dict) and agent_metadata.get("tmax_aborted"):
+        # Preserve the distinction between an infrastructure/agent failure and
+        # a valid model reward. The fully-async buffer will reject this group
+        # and its retry handler will regenerate the prompt.
+        for sample in samples:
+            sample.status = Sample.Status.ABORTED
     if collect_spec_metrics:
         for sample in samples:
             sample.metadata.pop(SESSION_ROLLOUT_METRICS_KEY, None)

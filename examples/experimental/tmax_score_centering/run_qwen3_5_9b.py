@@ -42,6 +42,7 @@ class ScriptArgs(command_utils.ExecuteTrainConfig):
     max_seq_len: int = 32768
     max_response_len: int = 16384
     eval_interval: int = 100
+    defer_eval: bool = False
     samples_per_eval_prompt: int = 1
     eval_max_steps: int = 64
     e2b_api_key_file: str = "/root/.config/e2b/api_key"
@@ -129,6 +130,9 @@ def execute(args: ScriptArgs):
         "--eval-temperature 1 --eval-top-p 1 --eval-top-k -1 "
         f"--eval-max-response-len {args.max_response_len} --eval-max-context-len {args.max_seq_len} "
     )
+    if args.defer_eval:
+        # Leaving eval_interval unset disables initial, periodic, and final eval.
+        evaluation = ""
     misc = f"--attention-dropout 0 --hidden-dropout 0 --accumulate-allreduce-grads-in-fp32 --attention-softmax-in-fp32 --attention-backend flash --actor-num-nodes 1 --actor-num-gpus-per-node 1 --num-gpus-per-node {args.num_gpus_per_node} --rollout-num-gpus {args.num_gpus_per_node - 1} "
     U.execute_train(
         train_args=" ".join(
