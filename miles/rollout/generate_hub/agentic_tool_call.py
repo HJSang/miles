@@ -73,6 +73,7 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
     metadata = {**metadata, "session_server_id": tracer.session_server_id}
 
     agent_metadata = None
+    agent_failed = False
     collect_failed = False
     t_start = time.monotonic()
     try:
@@ -85,7 +86,10 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
         )
         logger.debug(f"{log_prefix} Agent function returned in {time.monotonic()-t_start:.1f}s")
     except Exception as e:
+        agent_failed = True
         logger.warning(f"{log_prefix} Agent function failed: {e}", exc_info=True)
+        if input.evaluation:
+            raise
 
     finally:
         # Collect even if the agent failed.
@@ -135,12 +139,12 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
             raise ValueError("a successful session collect must carry metrics")
 
     samples = result.samples
-    if isinstance(agent_metadata, dict) and agent_metadata.get("tmax_aborted"):
-        # Preserve the distinction between an infrastructure/agent failure and
-        # a valid model reward. The fully-async buffer will reject this group
-        # and its retry handler will regenerate the prompt.
+    if agent_failed:
+        # Partial model calls from a failed agent are not a completed episode.
+        # Skip reward dispatch and let the buffer retry the whole prompt group.
         for sample in samples:
             sample.status = Sample.Status.ABORTED
+            sample.reward = None
     if collect_spec_metrics:
         for sample in samples:
             sample.metadata.pop(SESSION_ROLLOUT_METRICS_KEY, None)
