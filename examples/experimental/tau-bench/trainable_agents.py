@@ -380,18 +380,20 @@ class TrainableAgentMixin:
         Returns:
             Tuple of (token_ids, loss_mask)
         """
-        curr = self._render(tokenizer, messages, add_generation_prompt=False)
         token_ids = []
         loss_mask = []
 
         # Case 1: last message is an assistant response
         if messages[-1]["role"] == "assistant":
+            curr = self._render(tokenizer, messages, add_generation_prompt=False)
             prev = self._render(tokenizer, messages[:-1], add_generation_prompt=True)
             new_tokens = tokenizer.encode(curr[len(prev) :], add_special_tokens=False)
             token_ids += new_tokens
             loss_mask += [1] * len(new_tokens)  # Mask only the new assistant tokens
         else:
-            # Case 2: last message is a tool response or environment observation
+            # Case 2: last message is a tool response or environment observation. Render it together
+            # with the next generation prompt, which the model consumes before its next turn.
+            curr = self._render(tokenizer, messages, add_generation_prompt=True)
             prev = self._render(tokenizer, messages[:-1], add_generation_prompt=False)
             new_tokens = tokenizer.encode(curr[len(prev) :], add_special_tokens=False)
             token_ids += new_tokens
