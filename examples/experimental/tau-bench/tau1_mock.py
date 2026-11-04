@@ -30,7 +30,9 @@ def main():
             output_path = os.path.join(local_dir, f"{env}_{s}_tasks.jsonl")
             with open(output_path, "w") as f:
                 for i, task in enumerate(env_instance.tasks):
-                    row = {"index": i, "metadata": task.model_dump()}
+                    # Record the domain and split alongside the task so one run can train on one
+                    # domain and evaluate on another (generate_with_tau reads them back).
+                    row = {"index": i, "metadata": {"env": env, "task_split": s, **task.model_dump()}}
                     f.write(json.dumps(row) + "\n")  # <-- one JSON object per line
             print(f"Saved preprocessed task indices for {env} ({s}) to {output_path}")
 

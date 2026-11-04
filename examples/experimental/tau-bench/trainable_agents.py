@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -63,6 +64,23 @@ TOOL_INSTRUCTION = (
     "from the tool system.\n"
 )
 
+# Qwen3-family chat templates render <think> blocks only for assistant turns after the latest
+# user message and drop them from earlier turns. Re-rendering the history then shrinks a prefix
+# the model has already consumed, which breaks the token-delta accounting in _get_token_delta.
+# Render every assistant turn the same way instead, so the rendered prefix only ever grows.
+_REASONING_ONLY_AFTER_LAST_QUERY = "loop.index0 > ns.last_query_index"
+
+# Thinking off keeps tau-bench turns short; set TAU_ENABLE_THINKING=1 to train with reasoning.
+ENABLE_THINKING = os.environ.get("TAU_ENABLE_THINKING", "0") == "1"
+
+# sglang tool-call parser matching the chat template's tool-call format: "qwen25" for the JSON
+# <tool_call> format (Qwen2.5 / Qwen3), "qwen3_coder" for the XML <function=...> format (Qwen3.5).
+TOOL_CALL_PARSER = os.environ.get("TAU_TOOL_CALL_PARSER", "qwen25")
+
+
+def _stable_chat_template(tokenizer: AutoTokenizer) -> str:
+    return tokenizer.chat_template.replace(_REASONING_ONLY_AFTER_LAST_QUERY, "true")
+
 
 class TrainableAgentMixin:
     """
@@ -86,6 +104,24 @@ class TrainableAgentMixin:
             Reformulated tool instruction text
         """
         return text.replace("You may call one or more functions to assist with the user query.", TOOL_INSTRUCTION)
+
+    def _render(
+        self,
+        tokenizer: AutoTokenizer,
+        messages: list[dict[str, Any]],
+        *,
+        add_generation_prompt: bool,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> str:
+        """Render messages with the chat template, consistently across turns (see _stable_chat_template)."""
+        return tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=add_generation_prompt,
+            tools=tools,
+            chat_template=_stable_chat_template(tokenizer),
+            enable_thinking=ENABLE_THINKING,
+        )
 
     async def _call_llm(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
         """
@@ -165,9 +201,7 @@ class TrainableAgentMixin:
         Returns:
             Tuple of (prompt_text, prompt_token_ids)
         """
-        prompt_text = state.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True, tools=self.tools_info
-        )
+        prompt_text = self._render(state.tokenizer, messages, add_generation_prompt=True, tools=self.tools_info)
         # Reformulate tool call instruction for tau-bench
         prompt_text = self._reformulate_tool_call(prompt_text)
         prompt_token_ids = state.tokenizer(prompt_text, add_special_tokens=False)["input_ids"]
@@ -221,9 +255,7 @@ class TrainableAgentMixin:
         # Multi-turn interaction loop
         for _ in range(max_num_steps):
             # Prepare payload for sglang
-            text_input = state.tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True, tools=self.tools_info
-            )
+            text_input = self._render(state.tokenizer, messages, add_generation_prompt=True, tools=self.tools_info)
             # Reformulate tool call instruction for tau-bench
             text_input = self._reformulate_tool_call(text_input)
             payload = {"text": text_input, "sampling_params": sampling_params}
@@ -348,19 +380,19 @@ class TrainableAgentMixin:
         Returns:
             Tuple of (token_ids, loss_mask)
         """
-        curr = tokenizer.apply_chat_template(messages, add_generation_prompt=False, tokenize=False)
+        curr = self._render(tokenizer, messages, add_generation_prompt=False)
         token_ids = []
         loss_mask = []
 
         # Case 1: last message is an assistant response
         if messages[-1]["role"] == "assistant":
-            prev = tokenizer.apply_chat_template(messages[:-1], add_generation_prompt=True, tokenize=False)
+            prev = self._render(tokenizer, messages[:-1], add_generation_prompt=True)
             new_tokens = tokenizer.encode(curr[len(prev) :], add_special_tokens=False)
             token_ids += new_tokens
             loss_mask += [1] * len(new_tokens)  # Mask only the new assistant tokens
         else:
             # Case 2: last message is a tool response or environment observation
-            prev = tokenizer.apply_chat_template(messages[:-1], add_generation_prompt=False, tokenize=False)
+            prev = self._render(tokenizer, messages[:-1], add_generation_prompt=False)
             new_tokens = tokenizer.encode(curr[len(prev) :], add_special_tokens=False)
             token_ids += new_tokens
             loss_mask += [0] * len(new_tokens)  # Don't mask environment/tool tokens
@@ -451,7 +483,7 @@ class TrainableToolCallingAgent(ToolCallingAgent, TrainableAgentMixin):
             "top_k": 50,
         }
         # Initialize OpenAI adapter
-        self.openai_adapter = create_openai_adapter(tools_info=self.tools_info, parser_type="qwen25")
+        self.openai_adapter = create_openai_adapter(tools_info=self.tools_info, parser_type=TOOL_CALL_PARSER)
 
 
 def agent_factory(

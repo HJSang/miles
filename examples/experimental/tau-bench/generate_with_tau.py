@@ -140,15 +140,21 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
 
     # Extract task index from sample prompt
     task_index = int(sample.prompt)
-    logger.info(f"Starting agent-environment interaction for task {task_index}")
+
+    # The dataset row names the tau-bench domain and split the task comes from (see
+    # tau1_mock.py), so a run can train on one domain and evaluate on another. Rows
+    # without them fall back to the configured defaults.
+    env_name = sample.metadata.get("env", tau_config.env)
+    task_split = sample.metadata.get("task_split", tau_config.task_split)
+    logger.info(f"Starting agent-environment interaction for {env_name}/{task_split} task {task_index}")
 
     # Initialize tau-bench environment
     env = get_env(
-        env_name=tau_config.env,
+        env_name=env_name,
         user_strategy=tau_config.user_strategy,
         user_model=tau_config.user_model,
         user_provider=tau_config.user_model_provider,
-        task_split=tau_config.task_split,
+        task_split=task_split,
         task_index=task_index,
     )
 
