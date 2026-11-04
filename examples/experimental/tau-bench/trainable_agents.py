@@ -1,9 +1,13 @@
+import asyncio
+import functools
 import json
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
+from functools import partial
 from typing import Any
 
 import numpy as np
@@ -134,6 +138,14 @@ def _stable_chat_template(tokenizer: AutoTokenizer) -> str:
     return tokenizer.chat_template.replace(_REASONING_ONLY_AFTER_LAST_QUERY, "true")
 
 
+@functools.cache
+def _env_executor(max_workers: int) -> ThreadPoolExecutor:
+    """tau-bench steps its environment with blocking litellm calls to the user simulator. They run
+    off the event loop, one worker per in-flight trajectory, so the other trajectories keep
+    generating meanwhile."""
+    return ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="tau-env")
+
+
 class TrainableAgentMixin:
     """
     Mixin class that provides trainable agent functionality for tau-bench environments.
@@ -230,6 +242,13 @@ class TrainableAgentMixin:
         """
         return self.openai_adapter.parse_response_to_openai_format(response)
 
+    async def _run_in_env(self, fn, *fn_args, **fn_kwargs):
+        """Run a blocking environment call (tool execution or user-simulator turn) off the event loop."""
+        args = self.rollout_args
+        in_flight = args.async_max_concurrent_samples or args.rollout_batch_size * args.n_samples_per_prompt
+        executor = _env_executor(in_flight)
+        return await asyncio.get_running_loop().run_in_executor(executor, partial(fn, *fn_args, **fn_kwargs))
+
     async def _execute_tool(self, env, action: Action):
         """
         Execute a tool/action in the environment.
@@ -241,9 +260,9 @@ class TrainableAgentMixin:
         Returns:
             Environment step result
         """
-        return env.step(action)
+        return await self._run_in_env(env.step, action)
 
-    def _initialize_environment(self, env, task_index: int | None) -> tuple[str, dict[str, Any]]:
+    async def _initialize_environment(self, env, task_index: int | None) -> tuple[str, dict[str, Any]]:
         """
         Initialize the environment and get initial observation.
 
@@ -255,9 +274,9 @@ class TrainableAgentMixin:
             Tuple of (observation, info)
         """
         if task_index is not None:
-            env_reset_res = env.reset(task_index=task_index)
+            env_reset_res = await self._run_in_env(env.reset, task_index=task_index)
         else:
-            env_reset_res = env.reset()
+            env_reset_res = await self._run_in_env(env.reset)
         return env_reset_res.observation, env_reset_res.info.model_dump()
 
     def _build_initial_messages(self, obs: str) -> list[dict[str, Any]]:
@@ -324,7 +343,7 @@ class TrainableAgentMixin:
         topk = 0 if evaluation else rollout_args.rollout_top_logprobs_num
 
         # Get initial environment state
-        obs, info = self._initialize_environment(env, task_index)
+        obs, info = await self._initialize_environment(env, task_index)
 
         # Build initial conversation
         messages = self._build_initial_messages(obs)
