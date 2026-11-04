@@ -18,6 +18,8 @@ from miles.utils.types import Sample
 
 # Set up logger for this module
 logger = logging.getLogger(__name__)
+# litellm logs two INFO lines per user-simulator call; keep the rollout log readable.
+logging.getLogger("LiteLLM").setLevel(logging.WARNING)
 
 # User simulator configuration.
 # tau-bench drives the user simulator through litellm, so any litellm-supported
