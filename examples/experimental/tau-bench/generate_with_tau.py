@@ -8,6 +8,7 @@ results to the format expected by miles's training pipeline.
 
 import logging
 import os
+from dataclasses import replace
 
 from tau_bench.envs import get_env
 from tau_bench.types import RunConfig
@@ -55,31 +56,19 @@ TAU_CONFIGS = {
 tau_config = RunConfig(**TAU_CONFIGS)
 
 
-def res_to_sample(res: InteractionResult, task_index: int) -> Sample:
+def res_to_sample(res: InteractionResult, sample: Sample) -> Sample:
+    """The prompt sample miles handed us, filled with the interaction.
+
+    Its identity fields (index, group_index, rollout_id, ...) are what miles uses to tell the
+    siblings of a group apart, so they are kept; the input sample itself is left untouched.
     """
-    Convert InteractionResult to Sample format for miles training.
-
-    This function transforms the tau-bench interaction result into the format
-    expected by miles's training pipeline, handling status mapping and response
-    length calculation.
-
-    Args:
-        res: InteractionResult from tau-bench agent
-        task_index: Index of the task being processed
-
-    Returns:
-        Sample object for miles training
-    """
-    # Map tau-bench status to miles status
-    status_mapping = {
-        Status.COMPLETED: "completed",
-        Status.TRUNCATED: "truncated",
-        Status.ABORTED: "aborted",
-    }
-    status = status_mapping.get(res.status)
-
-    return Sample(
-        index=task_index,
+    status = {
+        Status.COMPLETED: Sample.Status.COMPLETED,
+        Status.TRUNCATED: Sample.Status.TRUNCATED,
+        Status.ABORTED: Sample.Status.ABORTED,
+    }[res.status]
+    return replace(
+        sample,
         prompt=res.prompt,
         tokens=res.tokens,
         response=res.response,
@@ -87,7 +76,7 @@ def res_to_sample(res: InteractionResult, task_index: int) -> Sample:
         reward=res.reward,
         loss_mask=res.loss_mask,
         status=status,
-        metadata=res.info,
+        metadata={**sample.metadata, **res.info},
         rollout_log_probs=res.rollout_log_probs,
         rollout_topk_token_ids=res.rollout_topk_token_ids,
         rollout_topk_log_probs=res.rollout_topk_log_probs,
@@ -153,7 +142,7 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
     )
 
     # Convert to miles Sample format
-    result_sample = res_to_sample(interaction_result, task_index)
+    result_sample = res_to_sample(interaction_result, sample)
 
     logger.info(f"Finished agent-environment interaction for task {task_index}")
     return GenerateFnOutput(samples=result_sample)
