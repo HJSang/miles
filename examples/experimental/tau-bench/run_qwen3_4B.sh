@@ -130,8 +130,8 @@ ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus ${NUM_GPUS} --disab
 # key in your shell before launching, e.g.:
 #   export TAU_USER_MODEL_PROVIDER=deepseek TAU_USER_MODEL=deepseek-chat
 #   export DEEPSEEK_API_KEY=sk-...
-# NOTE: only the Gemini and DeepSeek keys are forwarded below. To use another
-# litellm provider, add its *_API_KEY to the env_vars block as well.
+# NOTE: only the Gemini, DeepSeek and OpenAI-compatible keys are forwarded below. To use
+# another litellm provider, add its *_API_KEY to the env_vars block as well.
 RUNTIME_ENV_JSON="{
   \"env_vars\": {
     \"PYTHONPATH\": \"/root/Megatron-LM/:${SCRIPT_DIR}\",
@@ -139,7 +139,11 @@ RUNTIME_ENV_JSON="{
     \"TAU_USER_MODEL_PROVIDER\": \"${TAU_USER_MODEL_PROVIDER:-gemini}\",
     \"TAU_USER_MODEL\": \"${TAU_USER_MODEL:-gemini-2.5-flash-lite}\",
     \"GEMINI_API_KEY\": \"${GEMINI_API_KEY:-}\",
-    \"DEEPSEEK_API_KEY\": \"${DEEPSEEK_API_KEY:-}\"
+    \"DEEPSEEK_API_KEY\": \"${DEEPSEEK_API_KEY:-}\",
+    \"OPENAI_API_KEY\": \"${OPENAI_API_KEY:-}\",
+    \"OPENAI_API_BASE\": \"${OPENAI_API_BASE:-}\",
+    \"TAU_TOOL_CALL_PARSER\": \"${TAU_TOOL_CALL_PARSER:-qwen25}\",
+    \"TAU_ENABLE_THINKING\": \"${TAU_ENABLE_THINKING:-0}\"
   }
 }"
 

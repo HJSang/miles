@@ -1,18 +1,26 @@
 import json
 import logging
 import os
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+import numpy as np
 from openai_tool_adapter import create_openai_adapter
 from tau_bench.agents.base import Agent
 from tau_bench.agents.tool_calling_agent import RESPOND_ACTION_NAME, ToolCallingAgent
 from tau_bench.types import Action, RunConfig
 from transformers import AutoTokenizer
 
+from miles.rollout.generate_utils.rollout_topk_logprobs import (
+    append_rollout_topk_logprobs,
+    configure_rollout_topk_logprobs_request,
+    pad_rollout_topk_logprobs,
+)
 from miles.rollout.inference_rollout.inference_rollout_common import GenerateState
 from miles.utils.http_utils import post
+from miles.utils.types import WeightVersionsPerCall
 
 # Set up logger for this module
 logger = logging.getLogger(__name__)
@@ -32,8 +40,52 @@ class InteractionResult:
     info: dict[str, Any]
     response: str = ""
     loss_mask: list[int] | None = None
-    tokens: int | None = None
+    tokens: list[int] | None = None
+    response_length: int = 0
     status: Status = Status.COMPLETED
+    # Per response token, from the engine call that produced it: the sampled token's log-prob,
+    # the top-k candidates (--rollout-top-logprobs-num) and the weight version. Observation
+    # rows hold 0.0 / -1 / -inf.
+    rollout_log_probs: list[float] | None = None
+    rollout_topk_token_ids: np.ndarray | None = None
+    rollout_topk_log_probs: np.ndarray | None = None
+    weight_versions: list[WeightVersionsPerCall] = field(default_factory=list)
+
+
+@dataclass
+class _Trajectory:
+    """The token sequence of one interaction, in exactly the order the engine consumed it."""
+
+    prompt_token_ids: list[int]
+    response_token_ids: list[int] = field(default_factory=list)
+    loss_mask: list[int] = field(default_factory=list)
+    rollout_log_probs: list[float] = field(default_factory=list)
+    rollout_topk_token_ids: np.ndarray | None = None
+    rollout_topk_log_probs: np.ndarray | None = None
+    weight_versions: list[WeightVersionsPerCall] = field(default_factory=list)
+
+    @property
+    def tokens(self) -> list[int]:
+        return self.prompt_token_ids + self.response_token_ids
+
+    def add_generated(self, meta_info: dict[str, Any], *, topk: int, sampling_logprobs_mode: str) -> list[int]:
+        """Append the engine's own output tokens with their sampled and candidate log-probs."""
+        generated = meta_info.get("output_token_logprobs") or []
+        token_ids = [token_id for _, token_id, *_ in generated]
+        self.response_token_ids += token_ids
+        self.rollout_log_probs += [log_prob for log_prob, *_ in generated]
+        self.loss_mask += [1] * len(token_ids)
+        if topk:
+            append_rollout_topk_logprobs(self, meta_info, topk, sampling_logprobs_mode=sampling_logprobs_mode)
+        self.weight_versions.append(WeightVersionsPerCall.from_meta_info(meta_info, output_end=len(self.tokens)))
+        return token_ids
+
+    def add_observation(self, token_ids: list[int]) -> None:
+        """Append tokens the model only reads: a tool result or user reply and the next generation prompt."""
+        self.response_token_ids += token_ids
+        self.rollout_log_probs += [0.0] * len(token_ids)
+        self.loss_mask += [0] * len(token_ids)
+        pad_rollout_topk_logprobs(self, len(token_ids))
 
 
 def call_to_action_sglang(calls: list[Any], text_response: str) -> Action:
@@ -66,7 +118,7 @@ TOOL_INSTRUCTION = (
 
 # Qwen3-family chat templates render <think> blocks only for assistant turns after the latest
 # user message and drop them from earlier turns. Re-rendering the history then shrinks a prefix
-# the model has already consumed, which breaks the token-delta accounting in _get_token_delta.
+# the model has already consumed, which breaks the prefix-based accounting in _observation_tokens.
 # Render every assistant turn the same way instead, so the rendered prefix only ever grows.
 _REASONING_ONLY_AFTER_LAST_QUERY = "loop.index0 > ns.last_query_index"
 
@@ -123,18 +175,48 @@ class TrainableAgentMixin:
             enable_thinking=ENABLE_THINKING,
         )
 
+    def _request_payload(
+        self, input_ids: list[int], sampling_params: dict[str, Any], *, evaluation: bool
+    ) -> dict[str, Any]:
+        """A /generate request over the exact tokens trained on, returning the sampler's log-probs.
+
+        Training requests also record the top-k candidates when --rollout-top-logprobs-num is set
+        (needed by --loss-type score_centering); evaluation never collects them.
+        """
+        payload = {"input_ids": input_ids, "sampling_params": deepcopy(sampling_params), "return_logprob": True}
+        if not evaluation:
+            configure_rollout_topk_logprobs_request(self.rollout_args, payload)
+        return payload
+
     async def _call_llm(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
         """
         Make an LLM call tracking.
 
         Args:
             url: SGLang server URL
-            payload: Request payload containing text and sampling parameters
+            payload: Request payload containing input_ids and sampling parameters
 
         Returns:
             LLM response from sglang server
         """
         return await post(url, payload)
+
+    def _observation_tokens(
+        self, tokenizer: AutoTokenizer, messages: list[dict[str, Any]], *, generated_eos: bool
+    ) -> list[int]:
+        """Tokens between the assistant turn the engine just produced and its next generation prompt.
+
+        The chat template closes the assistant turn with ``eos_token + "\\n"`` after the trimmed
+        content. The engine produced the content itself and, unless it hit the length limit, the
+        eos token too, so only the rest is tokenized: the trained sequence stays exactly what the
+        engine consumed instead of a re-tokenization of the rendered text.
+        """
+        prev = self._render(tokenizer, messages[:-1], add_generation_prompt=False)
+        curr = self._render(tokenizer, messages, add_generation_prompt=True)
+        turn_end = tokenizer.eos_token + "\n"
+        assert prev.endswith(turn_end) and curr.startswith(prev), "unexpected assistant turn rendering"
+        text = ("" if generated_eos else tokenizer.eos_token) + "\n" + curr[len(prev) :]
+        return tokenizer.encode(text, add_special_tokens=False)
 
     def _parse_tool(self, response: str) -> dict[str, Any]:
         """
@@ -216,6 +298,7 @@ class TrainableAgentMixin:
         max_num_steps: int = 30,
         *,
         state: GenerateState,
+        evaluation: bool = False,
     ) -> InteractionResult:
         """
         Execute async agent-environment interaction for training.
@@ -230,12 +313,15 @@ class TrainableAgentMixin:
             sampling_params: LLM sampling parameters
             task_index: Specific task index to solve (optional)
             max_num_steps: Maximum number of interaction steps
+            evaluation: Whether this is an evaluation rollout (no candidate log-prob collection)
 
         Returns:
             InteractionResult containing the complete interaction trajectory
         """
         # Initialize environment and state
         url = f"http://{rollout_args.sglang_router_ip}:" f"{rollout_args.sglang_router_port}/generate"
+        tokenizer = state.tokenizer
+        topk = 0 if evaluation else rollout_args.rollout_top_logprobs_num
 
         # Get initial environment state
         obs, info = self._initialize_environment(env, task_index)
@@ -245,8 +331,7 @@ class TrainableAgentMixin:
         prompt_text, prompt_token_ids = self._prepare_prompt_tokens(state, messages)
 
         # Initialize tracking variables
-        loss_masks = []
-        response_token_ids = []
+        traj = _Trajectory(prompt_token_ids=prompt_token_ids)
         total_reward = 0.0
 
         # Initialize result
@@ -254,22 +339,20 @@ class TrainableAgentMixin:
 
         # Multi-turn interaction loop
         for _ in range(max_num_steps):
-            # Prepare payload for sglang
-            text_input = self._render(state.tokenizer, messages, add_generation_prompt=True, tools=self.tools_info)
-            # Reformulate tool call instruction for tau-bench
-            text_input = self._reformulate_tool_call(text_input)
-            payload = {"text": text_input, "sampling_params": sampling_params}
-
-            # Send request to sglang server
+            # Send the tokens accumulated so far to sglang
+            payload = self._request_payload(traj.tokens, sampling_params, evaluation=evaluation)
             output = await self._call_llm(url, payload)
 
             # Check for abort
             if output["meta_info"]["finish_reason"]["type"] == "abort":
                 res.status = Status.ABORTED
-                return self._build_final_result(
-                    res, total_reward, info, messages, loss_masks, prompt_token_ids, response_token_ids
-                )
+                return self._build_final_result(res, total_reward, info, messages, traj)
 
+            generated = traj.add_generated(
+                output["meta_info"],
+                topk=topk,
+                sampling_logprobs_mode=payload.get("sampling_logprobs_mode", "selected"),
+            )
             response = output["text"]
             # Remove end of conversation token if present
             if response.endswith("<|im_end|>"):
@@ -287,9 +370,7 @@ class TrainableAgentMixin:
                         f"rollout response: {response} can not be parsed into " f"tool calls {openai_result['error']}"
                     )
                     res.status = Status.ABORTED
-                    return self._build_final_result(
-                        res, total_reward, info, messages, loss_masks, prompt_token_ids, response_token_ids
-                    )
+                    return self._build_final_result(res, total_reward, info, messages, traj)
 
                 # Extract parsed results
                 parsed = openai_result["parsed_result"]
@@ -301,15 +382,10 @@ class TrainableAgentMixin:
                 logger.warning(f"Exception in OpenAI adapter: {e}")
                 logger.warning(f"rollout response: {response} can not be parsed into " f"tool calls {e}")
                 res.status = Status.ABORTED
-                return self._build_final_result(
-                    res, total_reward, info, messages, loss_masks, prompt_token_ids, response_token_ids
-                )
+                return self._build_final_result(res, total_reward, info, messages, traj)
 
             # Add assistant response to conversation
             messages.append({"role": "assistant", "content": response})
-            assistant_token_ids, assistant_loss_mask = self._get_token_delta(state.tokenizer, messages)
-            response_token_ids.extend(assistant_token_ids)
-            loss_masks.extend(assistant_loss_mask)
 
             # Execute action in environment
             agent_content, calls = parsed["normal_text"], parsed["calls"]
@@ -323,9 +399,7 @@ class TrainableAgentMixin:
                 logger.warning("Environment step failed, this is usually related to " "the User simulation call.")
                 logger.warning(f"Error: {e}")
                 res.status = Status.ABORTED
-                return self._build_final_result(
-                    res, total_reward, info, messages, loss_masks, prompt_token_ids, response_token_ids
-                )
+                return self._build_final_result(res, total_reward, info, messages, traj)
 
             logger.debug(f"Environment response: reward={env_response.reward}, " f"done={env_response.done}")
 
@@ -342,10 +416,9 @@ class TrainableAgentMixin:
                 # Direct response from user
                 messages.append({"role": "user", "content": env_response.observation})
 
-            # Update token tracking
-            env_token_ids, env_loss_mask = self._get_token_delta(state.tokenizer, messages)
-            response_token_ids.extend(env_token_ids)
-            loss_masks.extend(env_loss_mask)
+            # Update token tracking: the observation and the next generation prompt
+            generated_eos = generated[-1:] == [tokenizer.eos_token_id]
+            traj.add_observation(self._observation_tokens(tokenizer, messages, generated_eos=generated_eos))
 
             # Update reward and info
             total_reward = env_response.reward
@@ -360,46 +433,7 @@ class TrainableAgentMixin:
         if not env_response.done:
             res.status = Status.TRUNCATED
 
-        return self._build_final_result(
-            res, total_reward, info, messages, loss_masks, prompt_token_ids, response_token_ids
-        )
-
-    def _get_token_delta(self, tokenizer: AutoTokenizer, messages: list[dict]) -> tuple[list[int], list[int]]:
-        """
-        Calculate token delta for multi-turn conversations.
-
-        Tokenization logic adapted from:
-        https://verl.readthedocs.io/en/v0.4.1/sglang_multiturn/multiturn.html
-        to calculate the right token count in a multi-turn environment using
-        delta between messages.
-
-        Args:
-            tokenizer: Tokenizer instance
-            messages: Conversation messages
-
-        Returns:
-            Tuple of (token_ids, loss_mask)
-        """
-        token_ids = []
-        loss_mask = []
-
-        # Case 1: last message is an assistant response
-        if messages[-1]["role"] == "assistant":
-            curr = self._render(tokenizer, messages, add_generation_prompt=False)
-            prev = self._render(tokenizer, messages[:-1], add_generation_prompt=True)
-            new_tokens = tokenizer.encode(curr[len(prev) :], add_special_tokens=False)
-            token_ids += new_tokens
-            loss_mask += [1] * len(new_tokens)  # Mask only the new assistant tokens
-        else:
-            # Case 2: last message is a tool response or environment observation. Render it together
-            # with the next generation prompt, which the model consumes before its next turn.
-            curr = self._render(tokenizer, messages, add_generation_prompt=True)
-            prev = self._render(tokenizer, messages[:-1], add_generation_prompt=False)
-            new_tokens = tokenizer.encode(curr[len(prev) :], add_special_tokens=False)
-            token_ids += new_tokens
-            loss_mask += [0] * len(new_tokens)  # Don't mask environment/tool tokens
-
-        return token_ids, loss_mask
+        return self._build_final_result(res, total_reward, info, messages, traj)
 
     def _build_final_result(
         self,
@@ -407,9 +441,7 @@ class TrainableAgentMixin:
         total_reward: float,
         info: dict[str, Any],
         messages: list[dict[str, Any]],
-        loss_masks: list[int],
-        prompt_token_ids: list[int],
-        response_token_ids: list[int],
+        traj: _Trajectory,
     ) -> InteractionResult:
         """
         Build the final interaction result with all collected data.
@@ -419,9 +451,7 @@ class TrainableAgentMixin:
             total_reward: Total reward accumulated during interaction
             info: Environment info dictionary
             messages: Complete conversation messages
-            loss_masks: Loss masks for training
-            prompt_token_ids: Prompt token IDs
-            response_token_ids: Response token IDs
+            traj: Token-level record of the interaction
 
         Returns:
             Populated InteractionResult
@@ -429,16 +459,18 @@ class TrainableAgentMixin:
         res.reward = total_reward
         res.info = info
         res.messages = messages
-        res.loss_mask = loss_masks
-        res.tokens = prompt_token_ids + response_token_ids
+        res.loss_mask = traj.loss_mask
+        res.tokens = traj.tokens
         res.response = "".join([msg.get("content", "") for msg in messages if msg["role"] == "assistant"])
-        res.response_length = len(loss_masks)
+        res.response_length = len(traj.response_token_ids)
+        res.rollout_log_probs = traj.rollout_log_probs
+        res.rollout_topk_token_ids = traj.rollout_topk_token_ids
+        res.rollout_topk_log_probs = traj.rollout_topk_log_probs
+        res.weight_versions = traj.weight_versions
 
         logger.debug(
             f"_build_final_result: response_length={res.response_length}, "
-            f"response_loss_mask_len={len(loss_masks)}, "
-            f"prompt_token_len={len(prompt_token_ids)}, "
-            f"response_token_len={len(response_token_ids)}, "
+            f"prompt_token_len={len(traj.prompt_token_ids)}, "
             f"response='{res.response[:100]}...'"
         )
         return res

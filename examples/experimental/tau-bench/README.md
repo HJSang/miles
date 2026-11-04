@@ -71,3 +71,39 @@ bash examples/experimental/tau-bench/run_qwen3_4B.sh
 ```
 
 If the matching `*_API_KEY` is not set, the run fails fast at startup with a clear error.
+## Training on one domain, evaluating on another
+
+`tau1_mock.py` records the tau-bench domain and split of every task in the row's
+`metadata`, and `generate_with_tau.py` builds the environment from them. Point
+`--prompt-data` at one domain and `--eval-prompt-data` at another, e.g. train on
+retail/train and evaluate on airline/test (held out) plus retail/dev (in domain):
+
+```bash
+--prompt-data /root/tau-bench/retail_train_tasks.jsonl
+--eval-prompt-data airline-test /root/tau-bench/airline_test_tasks.jsonl retail-dev /root/tau-bench/retail_dev_tasks.jsonl
+```
+
+## Qwen3.5 policies
+
+Qwen3.5 chat templates emit tool calls in the XML `<function=...>` format and render
+`<think>` blocks. Select the matching sglang parser, and keep thinking off (the default)
+so turns stay short:
+
+```bash
+export TAU_TOOL_CALL_PARSER=qwen3_coder   # default qwen25: JSON <tool_call> (Qwen2.5 / Qwen3)
+export TAU_ENABLE_THINKING=0              # 1 keeps the reasoning of every turn in context
+```
+
+Both are read inside the rollout actors; the launch script forwards them to ray.
+
+## A local user simulator
+
+Any OpenAI-compatible server works as the user simulator through litellm's `openai`
+provider, e.g. an sglang server on spare GPUs:
+
+```bash
+python -m sglang.launch_server --model-path Qwen/Qwen3-30B-A3B-Instruct-2507 \
+    --served-model-name usersim --port 30100
+export TAU_USER_MODEL_PROVIDER=openai TAU_USER_MODEL=usersim
+export OPENAI_API_KEY=local OPENAI_API_BASE=http://127.0.0.1:30100/v1
+```

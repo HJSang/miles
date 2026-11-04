@@ -76,44 +76,21 @@ def res_to_sample(res: InteractionResult, task_index: int) -> Sample:
     }
     status = status_mapping.get(res.status)
 
-    # Debug logging for response tracking
-    logger.debug(
-        f"res_to_sample: response_length="
-        f"{res.response_length if hasattr(res, 'response_length') else 'None'}, "  # config-access-exempt: Tau agents attach response_length only when final token accounting is available
-        f"loss_mask_len={len(res.loss_mask) if res.loss_mask else 'None'}, "
-        f"tokens_len={len(res.tokens) if res.tokens else 'None'}"
-    )
-
-    # Create sample with basic information
-    sample = Sample(
+    return Sample(
         index=task_index,
         prompt=res.prompt,
         tokens=res.tokens,
         response=res.response,
+        response_length=res.response_length,
         reward=res.reward,
         loss_mask=res.loss_mask,
         status=status,
         metadata=res.info,
+        rollout_log_probs=res.rollout_log_probs,
+        rollout_topk_token_ids=res.rollout_topk_token_ids,
+        rollout_topk_log_probs=res.rollout_topk_log_probs,
+        weight_versions=res.weight_versions,
     )
-
-    # Ensure response_length is set correctly
-    if hasattr(
-        res, "response_length"
-    ):  # config-access-exempt: Tau agents attach response_length only when final token accounting is available
-        sample.response_length = res.response_length
-    else:
-        # Fallback: calculate from loss_mask if available
-        if res.loss_mask:
-            # loss_mask only contains response part, so length equals response_length
-            sample.response_length = len(res.loss_mask)
-        elif res.tokens:
-            # If no loss_mask available, use total tokens as fallback
-            sample.response_length = len(res.tokens)
-        else:
-            sample.response_length = 0
-            logger.debug(f"res_to_sample: Set response_length={sample.response_length}")
-
-    return sample
 
 
 async def generate(input: GenerateFnInput) -> GenerateFnOutput:
@@ -170,7 +147,7 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
     # Execute agent-environment interaction
     # Note: The sample.prompt field contains the task index for repeatability
     interaction_result = await agent.asolve(
-        env, agent.rollout_args, agent.sampling_params, task_index, state=input.state
+        env, agent.rollout_args, agent.sampling_params, task_index, state=input.state, evaluation=input.evaluation
     )
 
     # Convert to miles Sample format
