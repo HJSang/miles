@@ -78,8 +78,12 @@ async def run_agent(base_url, prompt, request_kwargs, metadata, **kwargs):
 - `request_kwargs` contains the rollout sampling settings in
   `ChatCompletionRequest`-compatible form. For example, Miles maps
   `max_new_tokens` to `max_tokens`.
-- `metadata` contains the sample metadata, session identifiers, and configured
-  `max_seq_len`. Forward only the fields your environment needs.
+- `metadata` contains the sample metadata, session identifiers, the configured
+  `max_seq_len`, and `inference_router_url` with `inference_router_headers`: the
+  rollout engines' router and the headers a direct request to it needs, for calls
+  that must bypass the session, such as a judge or a user simulator served by the
+  same engines without the trained adapter. Forward only the fields your
+  environment needs.
 - Return a dictionary to merge rewards, reports, or metrics into each output
   sample's metadata, or return `None` when there is nothing to add.
 

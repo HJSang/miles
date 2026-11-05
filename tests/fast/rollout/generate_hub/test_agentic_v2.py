@@ -44,6 +44,9 @@ def _generate_input(
             "partial_rollout": False,
             "use_session_server": "v2",
             "sglang": make_sglang_config(speculative_algorithm=speculative_algorithm),
+            "sglang_router_ip": "10.0.0.1",
+            "sglang_router_port": 30000,
+            "router": "miles",
             **args_kwargs,
         }
     )
@@ -73,6 +76,11 @@ def _session_metadata(spec_info=None):
 
 def _patch_agent(monkeypatch, tracer) -> list[str | None]:
     extra_keys: list[str | None] = []
+    tracer.agent_kwargs = []
+
+    async def fake_agent(**kwargs):
+        tracer.agent_kwargs.append(kwargs)
+        return await _fake_agent(**kwargs)
 
     async def fake_create(args, *, evaluation=False, sampling_params=None, extra_key=None):
         tracer.evaluation = evaluation
@@ -81,7 +89,7 @@ def _patch_agent(monkeypatch, tracer) -> list[str | None]:
         return tracer
 
     monkeypatch.setattr(agentic_tool_call.OpenAIEndpointTracer, "create", fake_create)
-    monkeypatch.setattr(agentic_tool_call, "load_function", lambda path: _fake_agent)
+    monkeypatch.setattr(agentic_tool_call, "load_function", lambda path: fake_agent)
     return extra_keys
 
 
@@ -101,6 +109,31 @@ async def test_success_returns_list_and_forwards_agent_metadata(monkeypatch, eva
     assert output.samples == [sample]
     assert output.samples[0].rollout_id is None
     assert tracer.agent_metadata == {"agent_result": "done"}
+    # The agent learns where the session and the engines' router are from metadata, not from args.
+    agent_metadata_in = tracer.agent_kwargs[-1]["metadata"]
+    assert agent_metadata_in["session_server_id"] == "127.0.0.1:12345"
+    assert agent_metadata_in["inference_router_url"] == "http://10.0.0.1:30000"
+    assert agent_metadata_in["inference_router_headers"] == {}
+    assert agent_metadata_in["source"] == "test"
+
+
+@pytest.mark.asyncio
+async def test_router_headers_carry_the_session_key_when_the_router_routes_by_key(monkeypatch):
+    sample = Sample(status=Sample.Status.COMPLETED, response="done", response_length=1, tokens=[1])
+    tracer = _Tracer(SamplesReply(samples=[sample], session_metadata={}, empty_reason=None))
+    _patch_agent(monkeypatch, tracer)
+    router_args = {"policy": None, "prefill_policy": None, "decode_policy": None}
+    generate_input = _generate_input(
+        router="sglang",
+        sglang_router_policy="consistent_hashing",
+        router_args=router_args,
+        rollout_external_router_pd=False,
+    )
+
+    await agentic_tool_call.generate(generate_input)
+
+    # A direct request to the router must carry the key the session's own turns are placed by.
+    assert tracer.agent_kwargs[-1]["metadata"]["inference_router_headers"] == {"X-SMG-Routing-Key": "sid-1"}
 
 
 @pytest.mark.parametrize("version", ["v1", "v2"])

@@ -1,73 +1,58 @@
-# Tau bench 
-This example shows miles training in an agentic multi-turn tool use environment. 
+# Tau bench
 
+miles training in an agentic multi-turn tool-use environment, on the
+[TITO session path](../../../docs/user-guide/agentic-rollout.md): tau-bench's own tool-calling
+agent talks OpenAI chat to the session server, which owns every policy turn's token ids,
+log-probs and adapter selection. The recipe trains Qwen3.8-27B with native LoRA on Megatron,
+fully async, with score centering.
 
-## Environment Setup 
-Use the `zhuzilin/miles:latest` image and initialize the environment required for Search-R1:
+- The policy trains on **retail/train** (500 tasks) and is evaluated on **airline/test** (50
+  tasks, a domain it never trains on) and **retail/dev** (20 tasks).
+- The user simulator is the **frozen base model** on the same rollout engines, thinking at low
+  effort: policy turns
+  carry the live LoRA adapter through the session, simulator turns go to the engines' router (miles hands its address to the agent) and get
+  no adapter. No external API is needed.
+- Policy turns think (`reasoning_effort` is a launcher flag) under a 1024-token budget per
+  turn, so the reward favors short reasoning.
+
+## Environment setup
+
+Use the `radixark/miles:dev` image and install tau-bench with its injectable model call (the
+`tito` branch, [JD-ETH/tau-bench#1](https://github.com/JD-ETH/tau-bench/pull/1): `ToolCallingAgent(chat=...)`,
+`get_env(user=...)`, every tool call of a turn executed, episodes ending on
+`finish_reason == "length"`):
 
 ```bash
 cd /root/
-git clone https://github.com/radixark/miles.git
-cd miles
-pip install -e . --no-deps
-# for tau bench 
-cd /root/
-git clone https://github.com/JD-ETH/tau-bench.git
+git clone -b tito https://github.com/HJSang/tau-bench.git
 cd tau-bench
-git checkout feature/litellm-retry
-pip install -e . --no-deps 
+pip install -e . --no-deps
 ```
 
-Use the following script to generate mock data for miles training. 
+## Running
+
+`prepare` downloads `Qwen/Qwen3.8-27B` to `--model-dir`, converts it to torch_dist next to it,
+and writes one prompt row per task under `--data-dir/tau-bench` (`tau1_mock.py`). The job
+then starts; W&B logging engages when `WANDB_API_KEY` is set.
 
 ```bash
-cd /root/miles/examples/experimental/tau-bench
-python tau1_mock.py --local_dir /root/tau-bench/
-```
-
-Initialize the Qwen2.5-3B-Instruct model needed for tool use:
-
-```bash
-# hf checkpoint
-hf download Qwen/Qwen3-4B-Instruct-2507 --local-dir /root/Qwen3-4B-Instruct-2507
-
-# mcore checkpoint
 cd /root/miles
-MODEL_ARGS_LINE="$(python3 miles/utils/external_utils/model_args_utils.py qwen3-4B-Instruct-2507)" || exit 1
-read -ra MODEL_ARGS <<< "${MODEL_ARGS_LINE}"
-PYTHONPATH=/root/Megatron-LM python tools/convert_hf_to_torch_dist.py \
-    ${MODEL_ARGS[@]} \
-    --hf-checkpoint /root/Qwen3-4B-Instruct-2507 \
-    --save /root/Qwen3-4B-Instruct-2507_torch_dist
+python examples/experimental/tau-bench/run_qwen3_8_27b_lora.py
 ```
 
-## Running the Script
-
-The user simulator runs through litellm, so any litellm-supported provider works.
-Select the provider/model and supply the matching key via environment variables —
-no need to edit `generate_with_tau.py`. The launch script forwards these to the
-ray workers.
-
-**DeepSeek:**
+Every field of `ScriptArgs` is a flag, for example:
 
 ```bash
-export TAU_USER_MODEL_PROVIDER=deepseek
-export TAU_USER_MODEL=deepseek-chat
-export DEEPSEEK_API_KEY=sk-...
-
-cd /root/miles
-bash examples/experimental/tau-bench/run_qwen3_4B.sh
+python examples/experimental/tau-bench/run_qwen3_8_27b_lora.py --reasoning-effort medium --max-turns 20
 ```
 
-**Gemini (default):**
+## Files
 
-```bash
-export TAU_USER_MODEL_PROVIDER=gemini          # optional, this is the default
-export TAU_USER_MODEL=gemini-2.5-flash-lite    # optional, this is the default
-export GEMINI_API_KEY=...
+| File | Role |
+|---|---|
+| `tau_agent.py` | `run`: one tau-bench episode per sample with tau-bench's own agent and simulator, the policy chat bound to the session, the simulator chat to the router. `reward_func`: the episode reward. |
+| `tau1_mock.py` | Writes the task rows: a placeholder prompt plus `env`, `task_split` and `task_index` metadata, which `run` turns into the environment. |
+| `run_qwen3_8_27b_lora.py` | The launcher. |
 
-cd /root/miles
-bash examples/experimental/tau-bench/run_qwen3_4B.sh
-```
-
-If the matching `*_API_KEY` is not set, the run fails fast at startup with a clear error.
+To train on another domain or split, point `--prompt-data` and `--eval-prompt-data` at the
+corresponding `tau1_mock.py` output; the rows carry the domain, so nothing else changes.

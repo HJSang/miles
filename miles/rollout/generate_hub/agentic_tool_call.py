@@ -43,6 +43,7 @@ from miles.rollout.agentic.agent_function import AGENT_FUNCTION_MODES, call_agen
 from miles.rollout.base_types import GenerateFnInput, GenerateFnOutput
 from miles.rollout.generate_utils.openai_endpoint_utils import OpenAIEndpointTracer
 from miles.rollout.session.v2.metrics import SESSION_ROLLOUT_METRICS_KEY
+from miles.router.backend import make_router_backend
 from miles.utils.function_registry import load_function
 from miles.utils.output_store.dropped import record_dropped_samples
 from miles.utils.rollout_data_config import lower_limit
@@ -88,6 +89,15 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
 
     # From the tracer, not args: with multiple instances the owning ip:port is per-session.
     metadata = {**metadata, "session_server_id": tracer.session_server_id}
+    # The engines' router, for a judge or user simulator served by the same engines without the adapter:
+    # its address (resolved at startup) and the routing headers the session's own turns carry.
+    metadata = {
+        **metadata,
+        "inference_router_url": f"http://{input.args.sglang_router_ip}:{input.args.sglang_router_port}",
+        "inference_router_headers": make_router_backend(input.args).routing_headers(
+            tracer.session_id, input.args.sglang.models
+        ),
+    }
 
     agent_metadata = None
     collect_failed = False

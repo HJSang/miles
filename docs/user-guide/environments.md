@@ -26,7 +26,7 @@ where the environment itself comes from:
 | [OpenEnv](https://github.com/huggingface/openenv) | agent function | [guide](/user-guide/openenv) |
 | [Strands Agents](https://strandsagents.com/) | generate function | [example](https://github.com/radixark/miles/tree/main/examples/experimental/strands_sglang) |
 | [Verifiers (Prime Intellect)](https://github.com/PrimeIntellect-ai/verifiers) | rollout function | [guide](/user-guide/verifiers) |
-| [τ-bench](https://github.com/sierra-research/tau-bench) | generate function | [example](https://github.com/radixark/miles/tree/main/examples/experimental/tau-bench) |
+| [τ-bench](https://github.com/sierra-research/tau-bench) | agent function | [example](https://github.com/radixark/miles/tree/main/examples/experimental/tau-bench) |
 
 Sandbox providers are a different axis: they provision the task containers
 *inside* a connector rather than occupying a rollout layer. Which providers work
